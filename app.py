@@ -171,12 +171,27 @@ def get_kbo_schedule(date_str):
 def home():
     return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now().strftime('%Y-%m-%d %H:%M')})
 
+# 팀명 → 파일명 매핑
+LOGO_FILES = {
+    "LG":  "lg.png",
+    "KT":  "kt.png",
+    "SSG": "ssg.png",
+    "NC":  "nc.png",
+    "두산": "doosan.png",
+    "KIA": "kia.png",
+    "롯데": "lotte.png",
+    "삼성": "samsung.png",
+    "한화": "hanwha.png",
+    "키움": "kiwoom.png"
+}
+
 @app.route('/logos/<team>')
 def get_logo(team):
-    # PNG 파일이 있으면 PNG 사용, 없으면 SVG 사용
-    png_path = os.path.join('static', 'logos', f'{team}.png')
-    if os.path.exists(png_path):
-        return send_from_directory('static/logos', f'{team}.png')
+    filename = LOGO_FILES.get(team)
+    if filename:
+        png_path = os.path.join('static', 'logos', filename)
+        if os.path.exists(png_path):
+            return send_from_directory('static/logos', filename)
     # PNG 없으면 기존 SVG 사용
     svg = TEAM_LOGOS_SVG.get(team, TEAM_LOGOS_SVG.get("LG"))
     from flask import Response
