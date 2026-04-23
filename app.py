@@ -8,45 +8,40 @@ app = Flask(__name__)
 CORS(app)
 
 channel_map = {
-    "genie": {"spotv": "51", "spotv2": "52", "mbc_sports": "60", "kbs_n_sports": "59"},
-    "Uplus": {"spotv": "254", "spotv2": "255", "mbc_sports": "227", "kbs_n_sports": "216"},
+    "olleh": {"spotv": "167", "spotv2": "168", "mbc_sports": "130", "kbs_n_sports": "133"},
+    "genie": {"spotv": "51", "spotv2": "52", "mbc_sports": "60", "kbs_n_sports": "63"},
     "btv":   {"spotv": "241", "spotv2": "242", "mbc_sports": "228", "kbs_n_sports": "220"}
 }
 
 KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
+STADIUMS  = ["잠실", "수원", "창원", "대구", "광주", "인천", "대전", "사직", "고척", "청주"]
 
 def strip_html(text):
-    """HTML 태그 제거"""
     return re.sub(r'<[^>]+>', '', text).strip()
 
 def get_kbo_schedule(date_str):
     year  = date_str[:4]
     month = date_str[4:6]
     day   = date_str[6:8]
-    target_date = f"{month}.{day}"  # 예: 04.23
+    target_date = f"{month}.{day}"
 
     url = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'User-Agent': 'Mozilla/5.0',
         'Referer': 'https://www.koreabaseball.com/Schedule/Schedule.aspx',
         'X-Requested-With': 'XMLHttpRequest',
         'Content-Type': 'application/x-www-form-urlencoded'
     }
     data = {
-        'leId': '1',
-        'srIdList': '0,9',
-        'seasonId': year,
-        'year': year,
-        'month': month,
-        'gameMonth': month,
-        'teamId': ''
+        'leId': '1', 'srIdList': '0,9',
+        'seasonId': year, 'year': year,
+        'month': month, 'gameMonth': month, 'teamId': ''
     }
 
     try:
         res = requests.post(url, headers=headers, data=data, timeout=10)
         res.encoding = 'utf-8'
         result = res.json()
-
         games = []
         current_date = ""
 
@@ -55,48 +50,43 @@ def get_kbo_schedule(date_str):
             if not row:
                 continue
 
-            # 각 셀의 텍스트 추출
             cells = [strip_html(cell.get('Text', '')) for cell in row]
 
-            # 날짜 셀 찾기 (예: 04.23(목))
+            # 날짜 업데이트
             for cell in cells:
-                if re.match(r'\d{2}\.\d{2}', cell):
-                    current_date = cell[:5]  # 04.23
+                if re.match(r'\d{2}\.\d{2}', cell) and len(cell) <= 8:
+                    current_date = cell[:5]
                     break
 
-            # 오늘 날짜 필터링
             if target_date not in current_date:
                 continue
 
-           # 시간, 팀명 찾기
-time_text = away_text = home_text = stadium_text = ''
-team_count = 0
+            # 시간 찾기
+            time_text = ''
+            for cell in cells:
+                if re.match(r'\d{2}:\d{2}', cell):
+                    time_text = cell
+                    break
 
-for cell in col_texts:
-    # 시간 찾기
-    clean = re.sub(r'<[^>]+>', '', cell).strip()
-    if re.match(r'\d{2}:\d{2}', clean) and not time_text:
-        time_text = clean
+            # 팀명 찾기 (순서대로: 첫번째=원정, 두번째=홈)
+            found_teams = []
+            for cell in cells:
+                if cell in KBO_TEAMS and cell not in found_teams:
+                    found_teams.append(cell)
+                if len(found_teams) == 2:
+                    break
 
-    # 팀명 찾기 (HTML 제거 후)
-    for team in KBO_TEAMS:
-        if team in clean and len(clean) <= 5:
-            if team_count == 0:
-                away_text = team
-                team_count += 1
-            elif team_count == 1 and team != away_text:
-                home_text = team
-                team_count += 1
-            break
+            # 구장 찾기
+            stadium_text = ''
+            for cell in reversed(cells):
+                for s in STADIUMS:
+                    if s in cell:
+                        stadium_text = cell
+                        break
+                if stadium_text:
+                    break
 
-    # 구장 찾기
-    stadiums = ['잠실', '수원', '창원', '대구', '광주', '인천', '대전', '사직', '고척', '청주']
-    for s in stadiums:
-        if s in clean:
-            stadium_text = clean
-            break
-
-            if len(found_teams) >= 2:
+            if len(found_teams) == 2:
                 games.append({
                     'time':    time_text or '시간미정',
                     'away':    found_teams[0],
