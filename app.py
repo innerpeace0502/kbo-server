@@ -1,10 +1,11 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from datetime import datetime
 import requests
 import re
+import os
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 CORS(app)
 
 channel_map = {
@@ -15,7 +16,6 @@ channel_map = {
 
 KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
 
-# 중계 채널 코드 매핑
 BROADCAST_MAP = {
     "SPO-T":  "spotv",
     "SPO-2T": "spotv2",
@@ -24,18 +24,63 @@ BROADCAST_MAP = {
     "TVING":  "tving"
 }
 
+# 구단 로고 SVG (서버에서 직접 제공)
+TEAM_LOGOS_SVG = {
+    "LG": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#C30452"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="32" fill="white" text-anchor="middle">LG</text>
+    </svg>''',
+    "KT": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#E31E26"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="32" fill="white" text-anchor="middle">KT</text>
+    </svg>''',
+    "SSG": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#CE0E2D"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">SSG</text>
+    </svg>''',
+    "NC": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#071D49"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="32" fill="white" text-anchor="middle">NC</text>
+    </svg>''',
+    "두산": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#131230"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">두산</text>
+    </svg>''',
+    "KIA": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#EA0029"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">KIA</text>
+    </svg>''',
+    "롯데": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#041E42"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">롯데</text>
+    </svg>''',
+    "삼성": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#0055A8"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">삼성</text>
+    </svg>''',
+    "한화": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#FF6600"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">한화</text>
+    </svg>''',
+    "키움": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+        <circle cx="50" cy="50" r="50" fill="#820024"/>
+        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">키움</text>
+    </svg>'''
+}
+
+def get_logo_url(team):
+    base = "https://web-production-6aae76.up.railway.app"
+    return f"{base}/logos/{team}"
+
 def strip_html(text):
     return re.sub(r'<[^>]+>', '', text).strip()
 
 def parse_teams_from_score(text):
-    """'KIA2vs7LG' 또는 'KT vs 한화' 형태에서 팀명 추출"""
-    # 숫자 제거 후 vs로 분리
     clean = re.sub(r'\d+', '', text)
     parts = re.split(r'vs', clean, flags=re.IGNORECASE)
     if len(parts) == 2:
         away = parts[0].strip()
         home = parts[1].strip()
-        # 팀명 목록과 대조
         away_team = next((t for t in KBO_TEAMS if t in away), away)
         home_team = next((t for t in KBO_TEAMS if t in home), home)
         if away_team and home_team:
@@ -72,24 +117,20 @@ def get_kbo_schedule(date_str):
             row = row_obj.get('row', [])
             if not row:
                 continue
-
             cells = [strip_html(cell.get('Text', '')) for cell in row]
 
-            # 날짜 업데이트 (예: '04.23(목)')
             for cell in cells:
-                if re.match(r'\d{2}\.\d{2}', cell):
+                if re.match(r'\d{2}\.\d{2}', cell) and len(cell) <= 8:
                     current_date = cell[:5]
                     break
 
             if target_date not in current_date:
                 continue
 
-            # 시간 (예: '18:30')
             time_text = next(
                 (c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '시간미정'
             )
 
-            # 팀명 파싱 (예: 'KIA2vs7LG' → KIA, LG)
             away_text = home_text = ''
             for cell in cells:
                 if 'vs' in cell.lower():
@@ -97,7 +138,6 @@ def get_kbo_schedule(date_str):
                     if away_text and home_text:
                         break
 
-            # 중계 채널
             broadcast = ''
             for cell in cells:
                 for code in BROADCAST_MAP:
@@ -107,7 +147,6 @@ def get_kbo_schedule(date_str):
                 if broadcast:
                     break
 
-            # 구장
             stadiums = ['잠실', '수원', '창원', '대구', '광주', '인천', '대전', '사직', '고척', '청주']
             stadium_text = next((c for c in cells if any(s in c for s in stadiums)), '')
 
@@ -117,7 +156,9 @@ def get_kbo_schedule(date_str):
                     'away':      away_text,
                     'home':      home_text,
                     'stadium':   stadium_text,
-                    'broadcast': broadcast
+                    'broadcast': broadcast,
+                    'away_logo': get_logo_url(away_text),
+                    'home_logo': get_logo_url(home_text)
                 })
 
         return games
@@ -129,6 +170,12 @@ def get_kbo_schedule(date_str):
 @app.route('/')
 def home():
     return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now().strftime('%Y-%m-%d %H:%M')})
+
+@app.route('/logos/<team>')
+def get_logo(team):
+    svg = TEAM_LOGOS_SVG.get(team, TEAM_LOGOS_SVG.get("LG"))
+    from flask import Response
+    return Response(svg, mimetype='image/svg+xml')
 
 @app.route('/api/schedule/today')
 def today_schedule():
