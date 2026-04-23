@@ -173,6 +173,11 @@ def home():
 
 @app.route('/logos/<team>')
 def get_logo(team):
+    # PNG 파일이 있으면 PNG 사용, 없으면 SVG 사용
+    png_path = os.path.join('static', 'logos', f'{team}.png')
+    if os.path.exists(png_path):
+        return send_from_directory('static/logos', f'{team}.png')
+    # PNG 없으면 기존 SVG 사용
     svg = TEAM_LOGOS_SVG.get(team, TEAM_LOGOS_SVG.get("LG"))
     from flask import Response
     return Response(svg, mimetype='image/svg+xml')
