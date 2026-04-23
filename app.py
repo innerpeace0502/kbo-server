@@ -8,8 +8,8 @@ app = Flask(__name__)
 CORS(app)
 
 channel_map = {
-    "olleh": {"spotv": "167", "spotv2": "168", "mbc_sports": "130", "kbs_n_sports": "133"},
-    "genie": {"spotv": "254", "spotv2": "255", "mbc_sports": "227", "kbs_n_sports": "216"},
+    "genie": {"spotv": "51", "spotv2": "52", "mbc_sports": "60", "kbs_n_sports": "59"},
+    "Uplus": {"spotv": "254", "spotv2": "255", "mbc_sports": "227", "kbs_n_sports": "216"},
     "btv":   {"spotv": "241", "spotv2": "242", "mbc_sports": "228", "kbs_n_sports": "220"}
 }
 
