@@ -14,10 +14,33 @@ channel_map = {
 }
 
 KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
-STADIUMS  = ["잠실", "수원", "창원", "대구", "광주", "인천", "대전", "사직", "고척", "청주"]
+
+# 중계 채널 코드 매핑
+BROADCAST_MAP = {
+    "SPO-T":  "spotv",
+    "SPO-2T": "spotv2",
+    "MBC-SP": "mbc_sports",
+    "KN-T":   "kbs_n_sports",
+    "TVING":  "tving"
+}
 
 def strip_html(text):
     return re.sub(r'<[^>]+>', '', text).strip()
+
+def parse_teams_from_score(text):
+    """'KIA2vs7LG' 또는 'KT vs 한화' 형태에서 팀명 추출"""
+    # 숫자 제거 후 vs로 분리
+    clean = re.sub(r'\d+', '', text)
+    parts = re.split(r'vs', clean, flags=re.IGNORECASE)
+    if len(parts) == 2:
+        away = parts[0].strip()
+        home = parts[1].strip()
+        # 팀명 목록과 대조
+        away_team = next((t for t in KBO_TEAMS if t in away), away)
+        home_team = next((t for t in KBO_TEAMS if t in home), home)
+        if away_team and home_team:
+            return away_team, home_team
+    return None, None
 
 def get_kbo_schedule(date_str):
     year  = date_str[:4]
@@ -52,46 +75,49 @@ def get_kbo_schedule(date_str):
 
             cells = [strip_html(cell.get('Text', '')) for cell in row]
 
-            # 날짜 업데이트
+            # 날짜 업데이트 (예: '04.23(목)')
             for cell in cells:
-                if re.match(r'\d{2}\.\d{2}', cell) and len(cell) <= 8:
+                if re.match(r'\d{2}\.\d{2}', cell):
                     current_date = cell[:5]
                     break
 
             if target_date not in current_date:
                 continue
 
-            # 시간 찾기
-            time_text = ''
-            for cell in cells:
-                if re.match(r'\d{2}:\d{2}', cell):
-                    time_text = cell
-                    break
+            # 시간 (예: '18:30')
+            time_text = next(
+                (c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '시간미정'
+            )
 
-            # 팀명 찾기 (순서대로: 첫번째=원정, 두번째=홈)
-            found_teams = []
+            # 팀명 파싱 (예: 'KIA2vs7LG' → KIA, LG)
+            away_text = home_text = ''
             for cell in cells:
-                if cell in KBO_TEAMS and cell not in found_teams:
-                    found_teams.append(cell)
-                if len(found_teams) == 2:
-                    break
-
-            # 구장 찾기
-            stadium_text = ''
-            for cell in reversed(cells):
-                for s in STADIUMS:
-                    if s in cell:
-                        stadium_text = cell
+                if 'vs' in cell.lower():
+                    away_text, home_text = parse_teams_from_score(cell)
+                    if away_text and home_text:
                         break
-                if stadium_text:
+
+            # 중계 채널
+            broadcast = ''
+            for cell in cells:
+                for code in BROADCAST_MAP:
+                    if code in cell:
+                        broadcast = BROADCAST_MAP[code]
+                        break
+                if broadcast:
                     break
 
-            if len(found_teams) == 2:
+            # 구장
+            stadiums = ['잠실', '수원', '창원', '대구', '광주', '인천', '대전', '사직', '고척', '청주']
+            stadium_text = next((c for c in cells if any(s in c for s in stadiums)), '')
+
+            if away_text and home_text:
                 games.append({
-                    'time':    time_text or '시간미정',
-                    'away':    found_teams[0],
-                    'home':    found_teams[1],
-                    'stadium': stadium_text
+                    'time':      time_text,
+                    'away':      away_text,
+                    'home':      home_text,
+                    'stadium':   stadium_text,
+                    'broadcast': broadcast
                 })
 
         return games
