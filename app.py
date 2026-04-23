@@ -68,26 +68,33 @@ def get_kbo_schedule(date_str):
             if target_date not in current_date:
                 continue
 
-            # 시간 찾기
-            time_text = ''
-            for cell in cells:
-                if re.match(r'\d{2}:\d{2}', cell):
-                    time_text = cell
-                    break
+           # 시간, 팀명 찾기
+time_text = away_text = home_text = stadium_text = ''
+team_count = 0
 
-            # 팀명 찾기
-            found_teams = []
-            for cell in cells:
-                for team in KBO_TEAMS:
-                    if team in cell and team not in found_teams:
-                        found_teams.append(team)
+for cell in col_texts:
+    # 시간 찾기
+    clean = re.sub(r'<[^>]+>', '', cell).strip()
+    if re.match(r'\d{2}:\d{2}', clean) and not time_text:
+        time_text = clean
 
-            # 구장 찾기 (마지막 셀들 중 팀명/시간이 아닌 것)
-            stadium_text = ''
-            for cell in reversed(cells):
-                if cell and cell not in found_teams and ':' not in cell and '.' not in cell and len(cell) <= 20:
-                    stadium_text = cell
-                    break
+    # 팀명 찾기 (HTML 제거 후)
+    for team in KBO_TEAMS:
+        if team in clean and len(clean) <= 5:
+            if team_count == 0:
+                away_text = team
+                team_count += 1
+            elif team_count == 1 and team != away_text:
+                home_text = team
+                team_count += 1
+            break
+
+    # 구장 찾기
+    stadiums = ['잠실', '수원', '창원', '대구', '광주', '인천', '대전', '사직', '고척', '청주']
+    for s in stadiums:
+        if s in clean:
+            stadium_text = clean
+            break
 
             if len(found_teams) >= 2:
                 games.append({
