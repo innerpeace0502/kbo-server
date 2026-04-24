@@ -504,6 +504,38 @@ def debug_raw():
     except Exception as e:
         return jsonify({'error': str(e)})
 
+@app.route('/api/debug/chrome')
+def debug_chrome():
+    """Railway에서 Chrome 경로 확인"""
+    import subprocess
+    paths_to_check = [
+        '/nix/var/nix/profiles/default/bin/chromium',
+        '/nix/var/nix/profiles/default/bin/chromedriver',
+        '/usr/bin/chromium',
+        '/usr/bin/chromedriver',
+        '/usr/bin/chromium-browser',
+    ]
+    result = {}
+    for path in paths_to_check:
+        result[path] = os.path.exists(path)
 
+    # which 명령어로 찾기
+    for cmd in ['chromium', 'chromedriver', 'google-chrome', 'chromium-browser']:
+        try:
+            out = subprocess.check_output(['which', cmd], stderr=subprocess.DEVNULL).decode().strip()
+            result[f'which_{cmd}'] = out
+        except:
+            result[f'which_{cmd}'] = 'not found'
+
+    # find로 chromedriver 찾기
+    try:
+        out = subprocess.check_output(['find', '/nix', '-name', 'chromedriver', '-type', 'f'],
+                                      stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+        result['find_nix_chromedriver'] = out if out else 'not found'
+    except:
+        result['find_nix_chromedriver'] = 'error'
+
+    return jsonify(result)
+    
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
