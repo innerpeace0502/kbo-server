@@ -188,7 +188,7 @@ def _get_today_stadium_map(today):
     """KBO API에서 오늘 경기 구장-팀 매핑 가져오기"""
     stadium_map = {}
     try:
-        year = today[:4]
+        year  = today[:4]
         month = today[4:6]
         headers = {
             'User-Agent': 'Mozilla/5.0',
@@ -256,7 +256,7 @@ def get_live_scores():
     from selenium.webdriver.support import expected_conditions as EC
     import time
 
-    today = datetime.now().strftime('%Y%m%d')
+    today    = datetime.now().strftime('%Y%m%d')
     STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주']
 
     options = Options()
@@ -266,26 +266,47 @@ def get_live_scores():
     options.add_argument('--disable-gpu')
     options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
 
-    # Railway(Linux) 환경 Chromium 경로 지정
-    if os.path.exists('/usr/bin/chromium'):
-        options.binary_location = '/usr/bin/chromium'
-    elif os.path.exists('/usr/bin/chromium-browser'):
-        options.binary_location = '/usr/bin/chromium-browser'
+    # 가능한 Chromium 바이너리 경로 (Railway Nix 우선)
+    chromium_paths = [
+        '/nix/var/nix/profiles/default/bin/chromium',
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome',
+    ]
+    # 가능한 chromedriver 경로 (Railway Nix 우선)
+    chromedriver_paths = [
+        '/nix/var/nix/profiles/default/bin/chromedriver',
+        '/usr/bin/chromedriver',
+        '/usr/lib/chromium/chromedriver',
+    ]
+
+    # Chromium 바이너리 경로 자동 탐색
+    for path in chromium_paths:
+        if os.path.exists(path):
+            options.binary_location = path
+            print(f"[Chromium] {path}")
+            break
 
     try:
-        if os.path.exists('/usr/bin/chromedriver'):
-            # Railway 환경
-            driver = webdriver.Chrome(
-                service=Service('/usr/bin/chromedriver'),
-                options=options
-            )
-        else:
-            # 로컬 환경
+        driver = None
+        # chromedriver 경로 자동 탐색
+        for cd_path in chromedriver_paths:
+            if os.path.exists(cd_path):
+                print(f"[chromedriver] {cd_path}")
+                driver = webdriver.Chrome(
+                    service=Service(cd_path),
+                    options=options
+                )
+                break
+
+        # 로컬 환경: webdriver-manager 사용
+        if driver is None:
             from webdriver_manager.chrome import ChromeDriverManager
             driver = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()),
                 options=options
             )
+
     except Exception as e:
         print(f"[Selenium 초기화 오류] {e}")
         return []
@@ -300,7 +321,7 @@ def get_live_scores():
         time.sleep(3)
 
         body_text = driver.find_element(By.TAG_NAME, 'body').text
-        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+        lines     = [l.strip() for l in body_text.split('\n') if l.strip()]
 
         # 오늘 경기 구장-팀 매핑
         stadium_team_map = _get_today_stadium_map(today)
@@ -376,27 +397,20 @@ def get_logo(team):
         if os.path.exists(png_path):
             return send_from_directory('static/logos', filename)
 
-    # PNG 없으면 Pillow로 팀 컬러 원형 PNG 생성
     from PIL import Image, ImageDraw, ImageFont
     import io
 
     team_colors = {
-        "LG":  (195, 4, 82),
-        "KT":  (227, 30, 38),
-        "SSG": (206, 14, 45),
-        "NC":  (7, 29, 73),
-        "두산": (19, 18, 48),
-        "KIA": (234, 0, 41),
-        "롯데": (4, 30, 66),
-        "삼성": (0, 85, 168),
-        "한화": (255, 102, 0),
+        "LG":  (195, 4, 82),  "KT":  (227, 30, 38), "SSG": (206, 14, 45),
+        "NC":  (7, 29, 73),   "두산": (19, 18, 48),  "KIA": (234, 0, 41),
+        "롯데": (4, 30, 66),   "삼성": (0, 85, 168),  "한화": (255, 102, 0),
         "키움": (130, 0, 36)
     }
 
     color = team_colors.get(team, (68, 68, 68))
-    size = 120
+    size  = 120
 
-    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    img  = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.ellipse([0, 0, size - 1, size - 1], fill=color)
 
@@ -407,8 +421,8 @@ def get_logo(team):
 
     text = team[:2]
     bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
+    tw   = bbox[2] - bbox[0]
+    th   = bbox[3] - bbox[1]
     draw.text(((size - tw) // 2, (size - th) // 2), text, fill=(255, 255, 255), font=font)
 
     img_data = io.BytesIO()
@@ -460,7 +474,7 @@ def channel():
 @app.route('/api/scores')
 def live_scores():
     """실시간 스코어 API"""
-    team = request.args.get('team')
+    team   = request.args.get('team')
     scores = get_live_scores()
     if team:
         scores = [s for s in scores if team in s['away'] or team in s['home']]
@@ -473,7 +487,7 @@ def debug_raw():
         today = datetime.now().strftime('%Y%m%d')
         year  = today[:4]
         month = today[4:6]
-        url = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"
+        url   = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"
         headers = {
             'User-Agent': 'Mozilla/5.0',
             'Referer': 'https://www.koreabaseball.com/Schedule/Schedule.aspx',

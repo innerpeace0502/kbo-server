@@ -1,2 +1,6 @@
 [phases.setup]
 nixPkgs = ["chromium", "chromedriver"]
+
+[variables]
+CHROME_BIN = "/nix/var/nix/profiles/default/bin/chromium"
+CHROMEDRIVER_PATH = "/nix/var/nix/profiles/default/bin/chromedriver"
