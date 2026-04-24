@@ -8,20 +8,52 @@ import os
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
-channel_map = {
-    "olleh": {"spotv": "167", "spotv2": "168", "mbc_sports": "130", "kbs_n_sports": "133"},
-    "genie": {"spotv": "51", "spotv2": "52", "mbc_sports": "60", "kbs_n_sports": "63"},
-    "btv":   {"spotv": "241", "spotv2": "242", "mbc_sports": "228", "kbs_n_sports": "220"}
-}
-
 KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
 
+channel_map = {
+    "genie": {  # KT 지니TV
+        "spotv":        "51",
+        "spotv2":       "52",
+        "kbs_n_sports": "133",
+        "mbc_sports":   "130",
+        "sbs_sports":   "131",
+        "kbs2":         "7",
+        "mbc":          "11",
+        "sbs":          "13",
+    },
+    "Uplus": {  # LG U플러스
+        "spotv":        "107",
+        "spotv2":       "108",
+        "kbs_n_sports": "133",
+        "mbc_sports":   "130",
+        "sbs_sports":   "131",
+        "kbs2":         "7",
+        "mbc":          "11",
+        "sbs":          "13",
+    },
+    "btv": {   # SK BTV
+        "spotv":        "986",
+        "spotv2":       "982",
+        "kbs_n_sports": "977",
+        "mbc_sports":   "978",
+        "sbs_sports":   "979",
+        "kbs2":         "7",
+        "mbc":          "11",
+        "sbs":          "13",
+    }
+}
+
 BROADCAST_MAP = {
-    "SPO-T":  "spotv",
-    "SPO-2T": "spotv2",
-    "MBC-SP": "mbc_sports",
-    "KN-T":   "kbs_n_sports",
-    "TVING":  "tving"
+    "SPO-T":   "spotv",
+    "SPO-2T":  "spotv2",
+    "KN-T":    "kbs_n_sports",
+    "MBC-SP":  "mbc_sports",
+    "MS-T":    "mbc_sports",
+    "SS-T":    "sbs_sports",   # ✅ SBS스포츠 추가
+    "S-T":     "sbs",          # ✅ SBS 추가
+    "M-T":     "mbc",          # ✅ MBC 추가
+    "K-2T":    "kbs2",         # ✅ KBS2 추가
+    "TVING":   "tving",
 }
 
 TEAM_LOGOS_SVG = {
