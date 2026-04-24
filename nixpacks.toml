@@ -1,5 +1,0 @@
-[phases.setup]
-nixPkgs = ["chromium", "chromium-unwrapped", "chromedriver"]
-
-[variables]
-NIXPACKS_NO_CACHE = "1"
