@@ -4,6 +4,4 @@ requests
 beautifulsoup4
 lxml
 gunicorn
-svglib
-reportlab
 Pillow
