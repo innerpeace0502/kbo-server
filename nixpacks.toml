@@ -1,6 +1,5 @@
 [phases.setup]
-nixPkgs = ["chromium", "chromedriver"]
+nixPkgs = ["chromium", "chromium-unwrapped", "chromedriver"]
 
 [variables]
-CHROME_BIN = "/nix/var/nix/profiles/default/bin/chromium"
-CHROMEDRIVER_PATH = "/nix/var/nix/profiles/default/bin/chromedriver"
+NIXPACKS_NO_CACHE = "1"
