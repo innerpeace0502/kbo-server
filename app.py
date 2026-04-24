@@ -360,7 +360,7 @@ def get_live_scores():
                         home_score = lines[i + 6]
 
                         # 유효성 검사
-                        if not re.match(r'\d+회[초말]|종료|경기전', inning_str):
+                        if not re.match(r'\d+회[초말]|종료|경기종료|경기전', inning_str):
                             i += 1
                             continue
                         if not away_score.isdigit() or not home_score.isdigit():
