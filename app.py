@@ -85,6 +85,23 @@ def get_logo_url(team):
     base = "https://web-production-6aae76.up.railway.app"
     return f"{base}/logos/{team}"
 
+from datetime import datetime, timezone, timedelta
+
+KST = timezone(timedelta(hours=9))
+
+def get_game_date():
+    """
+    경기 날짜 기준: 새벽 4시 이전은 전날 날짜 반환
+    예) 4/19 새벽 3시 → 4/18 날짜 반환 (전날 경기 결과 유지)
+        4/19 새벽 4시 이후 → 4/19 날짜 반환
+    """
+    now = datetime.now(KST)
+    if now.hour < 4:
+        # 자정~새벽 4시는 전날 날짜
+        game_date = now - timedelta(days=1)
+    else:
+        game_date = now
+    return game_date.strftime('%Y%m%d')
 
 def strip_html(text):
     return re.sub(r'<[^>]+>', '', text).strip()
@@ -256,7 +273,7 @@ def get_live_scores():
     from selenium.webdriver.support import expected_conditions as EC
     import time
 
-    today    = datetime.now().strftime('%Y%m%d')
+    today = get_game_date()
     STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주']
 
     options = Options()
@@ -435,8 +452,8 @@ def get_logo(team):
 @app.route('/api/schedule/today')
 def today_schedule():
     team      = request.args.get('team')
-    today     = datetime.today()
-    today_str = today.strftime('%Y%m%d')
+    today_str = get_game_date()          # ← datetime.today() 대신
+    today     = datetime.strptime(today_str, '%Y%m%d')
     games     = get_kbo_schedule(today_str)
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
@@ -473,12 +490,11 @@ def channel():
 
 @app.route('/api/scores')
 def live_scores():
-    """실시간 스코어 API"""
     team   = request.args.get('team')
     scores = get_live_scores()
     if team:
         scores = [s for s in scores if team in s['away'] or team in s['home']]
-    return jsonify({'scores': scores, 'updated': datetime.now().strftime('%H:%M:%S')})
+    return jsonify({'scores': scores, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
 @app.route('/api/debug/raw')
@@ -536,6 +552,6 @@ def debug_chrome():
         result['find_nix_chromedriver'] = 'error'
 
     return jsonify(result)
-    
+
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
