@@ -180,7 +180,7 @@ def get_kbo_schedule(date_str):
                 if broadcast:
                     break
 
-            stadiums = ['잠실', '수원', '창원', '대구', '광주', '인천', '대전', '사직', '고척', '청주']
+            STADIUMS = ['잠실', '수원', '창원', '대구', '광주', '인천', '문학', '대전', '사직', '고척', '청주']
             stadium_text = next((c for c in cells if any(s in c for s in stadiums)), '')
 
             if away_text and home_text:
