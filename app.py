@@ -192,10 +192,60 @@ def get_logo(team):
         png_path = os.path.join('static', 'logos', filename)
         if os.path.exists(png_path):
             return send_from_directory('static/logos', filename)
-    # PNG 없으면 기존 SVG 사용
+    
+    # PNG 없으면 SVG → PNG 변환 후 반환
     svg = TEAM_LOGOS_SVG.get(team, TEAM_LOGOS_SVG.get("LG"))
-    from flask import Response
-    return Response(svg, mimetype='image/svg+xml')
+    try:
+        from svglib.svglib import svg2rlg
+        from reportlab.graphics import renderPM
+        import io
+        
+        # SVG 문자열을 임시 파일로 저장 후 변환
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.svg', delete=False, mode='w') as f:
+            f.write(svg)
+            tmp_path = f.name
+        
+        drawing = svg2rlg(tmp_path)
+        img_data = io.BytesIO()
+        renderPM.drawToFile(drawing, img_data, fmt="PNG")
+        img_data.seek(0)
+        os.unlink(tmp_path)
+        
+        from flask import send_file
+        return send_file(img_data, mimetype='image/png')
+    except Exception as e:
+        # 변환 실패 시 원형 색상 PNG 생성
+        from PIL import Image, ImageDraw, ImageFont
+        import io
+        
+        color = {
+            "LG": (195, 4, 82), "KT": (227, 30, 38), "SSG": (206, 14, 45),
+            "NC": (7, 29, 73), "두산": (19, 18, 48), "KIA": (234, 0, 41),
+            "롯데": (4, 30, 66), "삼성": (0, 85, 168), "한화": (255, 102, 0),
+            "키움": (130, 0, 36)
+        }.get(team, (68, 68, 68))
+        
+        img = Image.new('RGBA', (120, 120), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([0, 0, 119, 119], fill=color)
+        
+        try:
+            font = ImageFont.truetype("arial.ttf", 32)
+        except:
+            font = ImageFont.load_default()
+        
+        text = team[:2]
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.text(((120-tw)//2, (120-th)//2), text, fill=(255,255,255), font=font)
+        
+        img_data = io.BytesIO()
+        img.save(img_data, format='PNG')
+        img_data.seek(0)
+        
+        from flask import send_file
+        return send_file(img_data, mimetype='image/png')
 
 @app.route('/api/schedule/today')
 def today_schedule():
