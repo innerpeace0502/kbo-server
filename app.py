@@ -555,6 +555,12 @@ def game_info():
     game_ids = get_game_id(today)
     if not game_ids:
         return jsonify({'error': '오늘 경기 없음'}), 404
+            ranking = get_team_ranking()
+    ranking_map = {r['team']: r for r in ranking}
+
+    away_rank = ranking_map.get(away_name, {})
+    home_rank = ranking_map.get(home_name, {})
+    
 
     if team and team in game_ids:
         game_id = game_ids[team]
@@ -579,6 +585,8 @@ def game_info():
             'away':     away_name,
             'home':     home_name,
             'status':   'live',
+            'away_rank': away_rank,
+            'home_rank': home_rank,
             'pitchers': {
                 'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
                 'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
@@ -595,6 +603,8 @@ def game_info():
             'game_id':  game_id,
             'away':     away_name,
             'home':     home_name,
+            'away_rank': away_rank,
+            'home_rank': home_rank,
             'status':   'pre',
             'pitchers': {
                 'away': [{'name': away_starter, 'timing': '선발', 'result': ''}] if away_starter else [],
@@ -633,6 +643,51 @@ def debug_raw():
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)})
+
+def get_team_ranking():
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import time
+    try:
+        driver = _get_selenium_driver()
+        driver.get('https://m.koreabaseball.com/Kbo/TeamRank.aspx')
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        time.sleep(2)
+        body = driver.find_element(By.TAG_NAME, 'body').text
+        driver.quit()
+        lines = [l.strip() for l in body.split('\n') if l.strip()]
+        teams_order = []
+        stats_list  = []
+        for line in lines:
+            m = re.match(r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)$', line)
+            if m:
+                teams_order.append({'rank': m.group(1), 'team': m.group(2)})
+            s = re.match(r'^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([-\d.]+)\s+(.+)$', line)
+            if s:
+                stats_list.append({
+                    'games': s.group(1), 'win': s.group(2), 'lose': s.group(3),
+                    'draw': s.group(4), 'pct': s.group(5), 'gb': s.group(6), 'streak': s.group(7)
+                })
+        ranking = []
+        for i, t in enumerate(teams_order):
+            stat = stats_list[i] if i < len(stats_list) else {}
+            ranking.append({
+                'rank': t['rank'], 'team': t['team'],
+                'games': stat.get('games',''), 'win': stat.get('win',''),
+                'lose': stat.get('lose',''), 'draw': stat.get('draw',''),
+                'pct': stat.get('pct',''), 'gb': stat.get('gb',''),
+                'streak': stat.get('streak','')
+            })
+        return ranking
+    except Exception as e:
+        print(f"[순위 오류] {e}")
+        return []
+
+@app.route('/api/ranking')
+def team_ranking():
+    ranking = get_team_ranking()
+    return jsonify({'ranking': ranking, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
 if __name__ == '__main__':
