@@ -585,5 +585,174 @@ def debug_chrome():
 
     return jsonify(result)
 
+def get_game_id(today):
+    """오늘 경기 gameId 목록 생성"""
+    year = today[:4]
+    month = today[4:6]
+    TEAM_CODE = {
+        'LG':'LG','KT':'KT','SSG':'SK','NC':'NC',
+        '두산':'OB','KIA':'HT','롯데':'LT',
+        '삼성':'SS','한화':'HH','키움':'WO'
+    }
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': 'https://www.koreabaseball.com/',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    data = {'leId':'1','srIdList':'0,9','seasonId':year,'year':year,
+            'month':month,'gameMonth':month,'teamId':''}
+    try:
+        res = requests.post(
+            'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+            headers=headers, data=data, timeout=10
+        )
+        result = res.json()
+        target_date = f"{month}.{today[6:8]}"
+        current_date = ''
+        game_ids = {}
+
+        for row_obj in result.get('rows', []):
+            row = row_obj.get('row', [])
+            for cell in row:
+                if cell.get('Class') == 'day':
+                    current_date = re.sub(r'<[^>]+>','',cell.get('Text','')).strip()[:5]
+            if target_date not in current_date:
+                continue
+            play_cell = next((c for c in row if c.get('Class') == 'play'), None)
+            if not play_cell:
+                continue
+            play_text = play_cell.get('Text', '')
+            teams = re.findall(r'<span(?:[^>]*)>(.*?)</span>', play_text)
+            teams = [t for t in teams if t and 'vs' not in t.lower()]
+            if len(teams) < 2:
+                continue
+            away = next((t for t in KBO_TEAMS if t in teams[0]), None)
+            home = next((t for t in KBO_TEAMS if t in teams[-1]), None)
+            if away and home:
+                game_id = f'{today}{TEAM_CODE[away]}{TEAM_CODE[home]}0'
+                game_ids[away] = game_id
+                game_ids[home] = game_id
+        return game_ids
+    except Exception as e:
+        print(f"[gameId 오류] {e}")
+        return {}
+
+
+def get_box_score(game_id, today):
+    """박스스코어 API에서 투수/라인업 파싱"""
+    import json as json_module
+    year = today[:4]
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': 'https://www.koreabaseball.com/',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+    data = {'gameId': game_id, 'leId': '1', 'srId': '0', 'seasonId': year}
+    try:
+        res = requests.post(
+            'https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll',
+            headers=headers, data=data, timeout=10
+        )
+        result = res.json()
+
+        # 투수 파싱
+        pitchers = []
+        for i, team in enumerate(result.get('arrPitcher', [])):
+            table = json_module.loads(team['table'])
+            rows = table['rows']
+            team_pitchers = []
+            for row in rows:
+                cells = row['row']
+                name        = cells[0]['Text']
+                timing      = cells[1]['Text']
+                result_text = cells[2]['Text'].replace('&nbsp;', '')
+                team_pitchers.append({
+                    'name':   name,
+                    'timing': timing,
+                    'result': result_text
+                })
+            pitchers.append(team_pitchers)
+
+        # 라인업 파싱 (첫 번째 타순만)
+        lineups = []
+        for i, team in enumerate(result.get('arrHitter', [])):
+            table = json_module.loads(team['table1'])
+            rows = table['rows']
+            seen = set()
+            team_lineup = []
+            for row in rows:
+                cells = row['row']
+                order = cells[0]['Text']
+                pos   = cells[1]['Text']
+                name  = cells[2]['Text']
+                if order not in seen:
+                    seen.add(order)
+                    team_lineup.append({
+                        'order': order,
+                        'pos':   pos,
+                        'name':  name
+                    })
+            lineups.append(team_lineup)
+
+        return {'pitchers': pitchers, 'lineups': lineups}
+    except Exception as e:
+        print(f"[박스스코어 오류] {e}")
+        return None
+
+
+@app.route('/api/gameinfo')
+def game_info():
+    """투수 + 라인업 통합 API"""
+    team  = request.args.get('team', '')
+    today = get_game_date()
+    year  = today[:4]
+
+    # 오늘 경기 gameId 가져오기
+    game_ids = get_game_id(today)
+    if not game_ids:
+        return jsonify({'error': '오늘 경기 없음'}), 404
+
+    # 팀 지정 시 해당 팀 경기만
+    if team and team in game_ids:
+        game_id = game_ids[team]
+    else:
+        game_id = list(game_ids.values())[0]
+
+    # 해당 경기 팀 정보
+    away_team = game_id[8:10] if len(game_id) >= 10 else ''
+    home_team = game_id[10:12] if len(game_id) >= 12 else ''
+
+    # 팀코드 → 팀명 역매핑
+    CODE_TEAM = {
+        'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
+        'OB':'두산','HT':'KIA','LT':'롯데',
+        'SS':'삼성','HH':'한화','WO':'키움'
+    }
+    away_name = CODE_TEAM.get(away_team, away_team)
+    home_name = CODE_TEAM.get(home_team, home_team)
+
+    # 박스스코어 조회
+    box = get_box_score(game_id, today)
+    if not box:
+        return jsonify({'error': '박스스코어 없음'}), 404
+
+    return jsonify({
+        'game_id':   game_id,
+        'away':      away_name,
+        'home':      home_name,
+        'pitchers':  {
+            'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
+            'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
+        },
+        'lineups': {
+            'away': box['lineups'][0] if len(box['lineups']) > 0 else [],
+            'home': box['lineups'][1] if len(box['lineups']) > 1 else []
+        },
+        'updated': datetime.now(KST).strftime('%H:%M:%S')
+    })
+
+
 if __name__ == '__main__':
     app.run(port=5000, debug=True)
