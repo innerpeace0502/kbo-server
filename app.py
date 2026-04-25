@@ -707,51 +707,145 @@ def game_info():
     """투수 + 라인업 통합 API"""
     team  = request.args.get('team', '')
     today = get_game_date()
-    year  = today[:4]
 
     # 오늘 경기 gameId 가져오기
     game_ids = get_game_id(today)
     if not game_ids:
         return jsonify({'error': '오늘 경기 없음'}), 404
 
-    # 팀 지정 시 해당 팀 경기만
     if team and team in game_ids:
         game_id = game_ids[team]
     else:
         game_id = list(game_ids.values())[0]
 
-    # 해당 경기 팀 정보
-    away_team = game_id[8:10] if len(game_id) >= 10 else ''
-    home_team = game_id[10:12] if len(game_id) >= 12 else ''
-
-    # 팀코드 → 팀명 역매핑
     CODE_TEAM = {
         'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
         'OB':'두산','HT':'KIA','LT':'롯데',
         'SS':'삼성','HH':'한화','WO':'키움'
     }
-    away_name = CODE_TEAM.get(away_team, away_team)
-    home_name = CODE_TEAM.get(home_team, home_team)
+    away_code = game_id[8:10]
+    home_code = game_id[10:12]
+    away_name = CODE_TEAM.get(away_code, away_code)
+    home_name = CODE_TEAM.get(home_code, home_code)
 
-    # 박스스코어 조회
+    # 박스스코어 조회 시도
     box = get_box_score(game_id, today)
-    if not box:
-        return jsonify({'error': '박스스코어 없음'}), 404
 
-    return jsonify({
-        'game_id':   game_id,
-        'away':      away_name,
-        'home':      home_name,
-        'pitchers':  {
-            'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
-            'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
-        },
-        'lineups': {
-            'away': box['lineups'][0] if len(box['lineups']) > 0 else [],
-            'home': box['lineups'][1] if len(box['lineups']) > 1 else []
-        },
-        'updated': datetime.now(KST).strftime('%H:%M:%S')
-    })
+    # 박스스코어에 데이터가 있는지 확인 (경기 시작 후)
+    has_data = (box and
+                len(box.get('pitchers', {}).get('away', [])) > 0)
+
+    if has_data:
+        # ✅ 경기 중/후: 박스스코어에서 실제 투수 + 라인업
+        return jsonify({
+            'game_id':  game_id,
+            'away':     away_name,
+            'home':     home_name,
+            'status':   'live',
+            'pitchers': box['pitchers'],
+            'lineups':  box['lineups'],
+            'updated':  datetime.now(KST).strftime('%H:%M:%S')
+        })
+    else:
+        # ✅ 경기 전: 게임센터 메인에서 선발투수만 파싱
+        away_starter, home_starter = get_starter_pitchers(today, game_id)
+        return jsonify({
+            'game_id':  game_id,
+            'away':     away_name,
+            'home':     home_name,
+            'status':   'pre',
+            'pitchers': {
+                'away': [{'name': away_starter, 'timing': '선발', 'result': ''}] if away_starter else [],
+                'home': [{'name': home_starter, 'timing': '선발', 'result': ''}] if home_starter else []
+            },
+            'lineups':  {'away': [], 'home': []},
+            'updated':  datetime.now(KST).strftime('%H:%M:%S')
+        })
+
+
+def get_starter_pitchers(today, game_id):
+    """게임센터 메인 텍스트에서 선발투수 파싱 (경기 전)"""
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+
+        chromium_paths   = ['/usr/bin/chromium', '/usr/bin/chromium-browser']
+        chromedriver_paths = ['/usr/bin/chromedriver']
+
+        for path in chromium_paths:
+            if os.path.exists(path):
+                options.binary_location = path
+                break
+
+        driver = None
+        for cd_path in chromedriver_paths:
+            if os.path.exists(cd_path):
+                driver = webdriver.Chrome(service=Service(cd_path), options=options)
+                break
+        if driver is None:
+            from webdriver_manager.chrome import ChromeDriverManager
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()), options=options)
+
+        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}&gameId={game_id}&section=LIVE'
+        driver.get(url)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        time.sleep(3)
+
+        body_text = driver.find_element(By.TAG_NAME, 'body').text
+        driver.quit()
+
+        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+
+        # 해당 game_id의 경기 위치 찾기
+        STADIUMS = ['잠실','문학','광주','고척','대전','수원','사직','창원','대구','인천','청주']
+        stadium_team_map = _get_today_stadium_map(today)
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
+            if stadium_match and re.search(r'\d{2}:\d{2}', line):
+                if i + 6 < len(lines):
+                    inning_str = lines[i + 2]
+                    away_pitcher_raw = lines[i + 4] if i + 4 < len(lines) else ''
+                    home_pitcher_raw = lines[i + 6] if i + 6 < len(lines) else ''
+
+                    # 승/패/홀드 제거
+                    away_pitcher = re.sub(r'^(승|패|홀드|세)', '', away_pitcher_raw).strip()
+                    home_pitcher = re.sub(r'^(승|패|홀드|세)', '', home_pitcher_raw).strip()
+
+                    teams = stadium_team_map.get(stadium_match)
+                    if teams:
+                        away, home = teams
+                        # game_id의 팀과 매칭
+                        CODE_TEAM = {
+                            'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
+                            'OB':'두산','HT':'KIA','LT':'롯데',
+                            'SS':'삼성','HH':'한화','WO':'키움'
+                        }
+                        away_code = game_id[8:10]
+                        if CODE_TEAM.get(away_code) == away:
+                            return away_pitcher, home_pitcher
+            i += 1
+
+        return '', ''
+
+    except Exception as e:
+        print(f"[선발투수 파싱 오류] {e}")
+        return '', ''
 
 
 if __name__ == '__main__':
