@@ -232,21 +232,37 @@ def _get_selenium_driver():
     chromedriver_paths = ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']
     for cd_path in chromedriver_paths:
         if os.path.exists(cd_path):
-            from selenium.webdriver.chrome.service import Service
-            return webdriver.Chrome(service=Service(cd_path), options=options)
+            from selenium.webdriver.chrome.service import Service as ChromeService
+            return webdriver.Chrome(service=ChromeService(cd_path), options=options)
 
     from webdriver_manager.chrome import ChromeDriverManager
-    from selenium.webdriver.chrome.service import Service
-    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    return webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)
 
 
-def get_live_scores():
+def _get_gamecenter_lines(today):
+    """게임센터 페이지 텍스트 라인 반환 (공통)"""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     import time
 
+    driver = _get_selenium_driver()
+    try:
+        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+        driver.get(url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        time.sleep(3)
+        body_text = driver.find_element(By.TAG_NAME, 'body').text
+        return [l.strip() for l in body_text.split('\n') if l.strip()]
+    finally:
+        driver.quit()
+
+
+def get_live_scores():
+    """Selenium으로 KBO 게임센터에서 실시간 스코어 크롤링"""
     today = get_game_date()
+
     try:
         driver = _get_selenium_driver()
     except Exception as e:
@@ -255,6 +271,11 @@ def get_live_scores():
 
     scores = []
     try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+
         url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
         driver.get(url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
@@ -270,40 +291,84 @@ def get_live_scores():
             stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
             if stadium_match and re.search(r'\d{2}:\d{2}', line):
                 try:
-                    if i + 2 < len(lines):
-                        status_line = lines[i + 2]
-                        if '경기예정' in status_line:
-                            teams = stadium_team_map.get(stadium_match)
-                            if teams:
-                                scores.append({
-                                    'away': teams[0], 'home': teams[1],
-                                    'away_score': '', 'home_score': '',
-                                    'status': '0', 'inning': ''
-                                })
-                            i += 6
-                            continue
-                        elif re.match(r'\d+회[초말]|경기종료', status_line):
-                            if i + 7 < len(lines):
+                    if i + 2 >= len(lines):
+                        i += 1
+                        continue
+
+                    status_line = lines[i + 2]
+                    teams = stadium_team_map.get(stadium_match)
+
+                    if '경기예정' in status_line:
+                        # 경기 전: status=0, 점수없음
+                        if teams:
+                            scores.append({
+                                'away': teams[0], 'home': teams[1],
+                                'away_score': '', 'home_score': '',
+                                'status': '0', 'inning': ''
+                            })
+                        i += 6
+                        continue
+
+                    elif '경기종료' in status_line:
+                        # ✅ 경기 종료: [경기종료] [원정점수] [VS] [홈점수]
+                        if i + 4 < len(lines):
+                            away_score = lines[i + 3]
+                            vs_line    = lines[i + 4] if i + 4 < len(lines) else ''
+                            home_score = lines[i + 5] if i + 5 < len(lines) else ''
+
+                            # 종료 시 VS 바로 다음이 홈점수
+                            if 'VS' in (lines[i + 3] if i + 3 < len(lines) else '').upper():
+                                # [경기종료] [VS] [홈점수] 구조인 경우
+                                away_score = lines[i + 1] if i + 1 < len(lines) else ''
+                                vs_line    = lines[i + 2] if i + 2 < len(lines) else ''
+                                home_score = lines[i + 3] if i + 3 < len(lines) else ''
+                            elif 'VS' in (lines[i + 4] if i + 4 < len(lines) else '').upper():
+                                # ✅ [경기종료] [원정점수] ... [VS] ... 구조
                                 away_score = lines[i + 3]
-                                vs_line    = lines[i + 5]
-                                home_score = lines[i + 6]
-                                if (away_score.isdigit() and home_score.isdigit()
-                                        and 'VS' in vs_line.upper()):
-                                    teams = stadium_team_map.get(stadium_match)
-                                    if teams:
-                                        status = '2' if '종료' in status_line else '1'
-                                        scores.append({
-                                            'away': teams[0], 'home': teams[1],
-                                            'away_score': away_score,
-                                            'home_score': home_score,
-                                            'status': status,
-                                            'inning': status_line
-                                        })
-                                        i += 8
-                                        continue
+                                vs_line    = lines[i + 4]
+                                home_score = lines[i + 5] if i + 5 < len(lines) else ''
+
+                            if away_score.isdigit() and home_score.isdigit():
+                                if teams:
+                                    scores.append({
+                                        'away': teams[0], 'home': teams[1],
+                                        'away_score': away_score,
+                                        'home_score': home_score,
+                                        'status': '2', 'inning': '경기종료'
+                                    })
+                        i += 8
+                        continue
+
+                    elif re.match(r'\d+회[초말]', status_line):
+                          # ✅ 경기 중: [이닝] [원정점수] [원정투수] [VS] [홈점수] [홈투수]
+                        if i + 7 < len(lines):
+                            away_raw = lines[i + 4]   # 원정 투수
+                            vs_check = lines[i + 5]   # VS
+                            home_raw = lines[i + 7]   # ✅ 홈 투수 (i+6은 홈 점수!)
+                            if 'VS' in vs_check.upper():
+                                away_p = re.sub(r'^(승|패|홀드|세)', '', away_raw).strip()
+                                home_p = re.sub(r'^(승|패|홀드|세)', '', home_raw).strip()
+                                return {
+                                    'status': 'live',
+                                    'away_pitcher': away_p,
+                                    'home_pitcher': home_p,
+                                    'lineups': {'away': [], 'home': []}
+                                }
+                                if teams:
+                                    scores.append({
+                                        'away': teams[0], 'home': teams[1],
+                                        'away_score': away_score,
+                                        'home_score': home_score,
+                                        'status': '1', 'inning': status_line
+                                    })
+                                    i += 8
+                                    continue
+
                 except Exception as e:
                     print(f"[파싱 오류] {e}")
+
             i += 1
+
     except Exception as e:
         print(f"[Selenium 오류] {e}")
     finally:
@@ -336,7 +401,7 @@ def get_game_id(today):
                 continue
             away = next((t for t in KBO_TEAMS if t in teams[0]), None)
             home = next((t for t in KBO_TEAMS if t in teams[-1]), None)
-            if away and home:
+            if away and home and away in TEAM_CODE and home in TEAM_CODE:
                 game_id = f'{today}{TEAM_CODE[away]}{TEAM_CODE[home]}0'
                 game_ids[away] = game_id
                 game_ids[home] = game_id
@@ -345,7 +410,109 @@ def get_game_id(today):
     return game_ids
 
 
+def get_pitcher_and_lineup_from_gamecenter(today, game_id):
+    """
+    게임센터 Selenium에서 투수+라인업 파싱
+    - 경기 예정: 선발투수만
+    - 경기 중: 현재 투수
+    - 경기 종료: 승리/패전 투수 (GetBoxScoreScroll에서)
+    """
+    try:
+        lines = _get_gamecenter_lines(today)
+        stadium_team_map = _get_today_stadium_map(today)
+
+        away_code   = game_id[8:10]
+        target_away = CODE_TEAM.get(away_code, '')
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
+            if not (stadium_match and re.search(r'\d{2}:\d{2}', line)):
+                i += 1
+                continue
+
+            teams = stadium_team_map.get(stadium_match)
+            print(f"[디버그] i={i} stadium={stadium_match} teams={teams} target_away={target_away}")  # ✅ 추가
+            
+            if not teams or teams[0] != target_away:
+                i += 1
+                continue
+
+            if i + 2 >= len(lines):
+                break
+
+            status_line = lines[i + 2]
+            print(f"[디버그] status_line={status_line}")  # ✅ 추가
+            print(f"[디버그] i+3={lines[i+3] if i+3<len(lines) else 'X'}")
+            print(f"[디버그] i+4={lines[i+4] if i+4<len(lines) else 'X'}")
+            print(f"[디버그] i+5={lines[i+5] if i+5<len(lines) else 'X'}")
+            print(f"[디버그] i+6={lines[i+6] if i+6<len(lines) else 'X'}")
+            print(f"[디버그] i+7={lines[i+7] if i+7<len(lines) else 'X'}")
+
+            if '경기예정' in status_line:
+                # [구장] [채널] [경기예정] [선원정투수] [VS] [선홈투수]
+                if i + 5 < len(lines):
+                    away_raw = lines[i + 3]
+                    vs_check = lines[i + 4]
+                    home_raw = lines[i + 5]
+                    if 'VS' in vs_check.upper():
+                        away_p = re.sub(r'^선', '', away_raw).strip()
+                        home_p = re.sub(r'^선', '', home_raw).strip()
+                        return {
+                            'status': 'pre',
+                            'away_pitcher': away_p,
+                            'home_pitcher': home_p,
+                            'lineups': {'away': [], 'home': []}
+                        }
+
+            elif '경기종료' in status_line:
+                # ✅ 경기종료: [경기종료] [원정점수] [VS] [홈점수]
+                # 투수 정보는 GetBoxScoreScroll에서 가져옴
+                return {
+                    'status': 'ended',
+                    'away_pitcher': '',
+                    'home_pitcher': '',
+                    'lineups': {'away': [], 'home': []}
+                }
+
+            elif re.match(r'\d+회[초말]', status_line):
+                if i + 7 < len(lines):
+                    away_raw = lines[i + 4]
+                    vs_check = lines[i + 5]
+                    home_raw = lines[i + 7]
+
+                    if 'VS' in vs_check.upper():
+                        is_top = '초' in status_line  # 회초 = 원정팀 공격
+
+                        away_raw_clean = re.sub(r'^(승|패|홀드|세)', '', away_raw).strip()
+                        home_raw_clean = re.sub(r'^(승|패|홀드|세)', '', home_raw).strip()
+
+                        if is_top:
+                            # 회초: 원정팀 공격(타자), 홈팀 수비(투수)
+                            away_p = f'타 {away_raw_clean}'
+                            home_p = f'투 {home_raw_clean}'
+                        else:
+                            # 회말: 원정팀 수비(투수), 홈팀 공격(타자)
+                            away_p = f'투 {away_raw_clean}'
+                            home_p = f'타 {home_raw_clean}'
+
+                        return {
+                            'status': 'live',
+                            'away_pitcher': away_p,
+                            'home_pitcher': home_p,
+                            'lineups': {'away': [], 'home': []}
+                        }
+            i += 1
+
+    except Exception as e:
+        print(f"[게임센터 파싱 오류] {e}")
+
+    return None
+
+
 def get_box_score(game_id, today):
+    """박스스코어 API - 경기 종료 후 투수/라인업"""
     year = today[:4]
     headers = _get_kbo_schedule_headers()
     data = {'gameId': game_id, 'leId': '1', 'srId': '0', 'seasonId': year}
@@ -355,6 +522,9 @@ def get_box_score(game_id, today):
             headers=headers, data=data, timeout=10
         )
         result = res.json()
+
+        if result.get('code') != '100':
+            return None
 
         pitchers = []
         for team in result.get('arrPitcher', []):
@@ -391,65 +561,6 @@ def get_box_score(game_id, today):
         return None
 
 
-def get_starter_pitchers(today, game_id):
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    import time
-
-    try:
-        driver = _get_selenium_driver()
-        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-        driver.get(url)
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        time.sleep(3)
-
-        body_text = driver.find_element(By.TAG_NAME, 'body').text
-        driver.quit()
-
-        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-        stadium_team_map = _get_today_stadium_map(today)
-
-        away_code   = game_id[8:10]
-        target_away = CODE_TEAM.get(away_code, '')
-
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
-            if stadium_match and re.search(r'\d{2}:\d{2}', line):
-                teams = stadium_team_map.get(stadium_match)
-                if teams and teams[0] == target_away:
-                    if i + 5 < len(lines):
-                        status_line = lines[i + 2]
-                        if '경기예정' in status_line:
-                            away_raw = lines[i + 3]
-                            vs_check = lines[i + 4]
-                            home_raw = lines[i + 5]
-                        elif i + 7 < len(lines):
-                            away_raw = lines[i + 4]
-                            vs_check = lines[i + 5]
-                            home_raw = lines[i + 6]
-                        else:
-                            i += 1
-                            continue
-
-                        if 'VS' not in vs_check.upper():
-                            i += 1
-                            continue
-
-                        away_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', away_raw).strip()
-                        home_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', home_raw).strip()
-                        return away_pitcher, home_pitcher
-            i += 1
-
-        return '', ''
-
-    except Exception as e:
-        print(f"[선발투수 파싱 오류] {e}")
-        return '', ''
-
-
 def get_team_ranking():
     """KBO 모바일에서 팀 순위 크롤링"""
     from selenium.webdriver.common.by import By
@@ -463,12 +574,10 @@ def get_team_ranking():
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.TAG_NAME, 'body')))
         time.sleep(2)
-
         body  = driver.find_element(By.TAG_NAME, 'body').text
         driver.quit()
 
         lines = [l.strip() for l in body.split('\n') if l.strip()]
-
         teams_order = []
         stats_list  = []
 
@@ -489,17 +598,12 @@ def get_team_ranking():
         for i, t in enumerate(teams_order):
             stat = stats_list[i] if i < len(stats_list) else {}
             ranking.append({
-                'rank':   t['rank'],
-                'team':   t['team'],
-                'games':  stat.get('games', ''),
-                'win':    stat.get('win', ''),
-                'lose':   stat.get('lose', ''),
-                'draw':   stat.get('draw', ''),
-                'pct':    stat.get('pct', ''),
-                'gb':     stat.get('gb', ''),
+                'rank':   t['rank'], 'team':  t['team'],
+                'games':  stat.get('games', ''), 'win':  stat.get('win', ''),
+                'lose':   stat.get('lose', ''),  'draw': stat.get('draw', ''),
+                'pct':    stat.get('pct', ''),   'gb':   stat.get('gb', ''),
                 'streak': stat.get('streak', '')
             })
-
         return ranking
 
     except Exception as e:
@@ -603,6 +707,7 @@ def live_scores():
 
 @app.route('/api/gameinfo')
 def game_info():
+    """투수 + 라인업 통합 API"""
     team  = request.args.get('team', '')
     today = get_game_date()
 
@@ -620,52 +725,55 @@ def game_info():
     away_name = CODE_TEAM.get(away_code, away_code)
     home_name = CODE_TEAM.get(home_code, home_code)
 
-    box = get_box_score(game_id, today)
+    # 1. 게임센터에서 투수 파싱
+    gc = get_pitcher_and_lineup_from_gamecenter(today, game_id)
 
-    has_data = (box is not None and
-                len(box.get('pitchers', [])) > 0 and
-                len(box['pitchers'][0]) > 0)
+    if gc and gc['status'] == 'ended':
+        # 경기 종료 → 박스스코어에서 투수/라인업
+        box = get_box_score(game_id, today)
+        if box and len(box.get('pitchers', [])) > 0:
+            return jsonify({
+                'game_id': game_id, 'away': away_name, 'home': home_name,
+                'status': 'ended',
+                'pitchers': {
+                    'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
+                    'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
+                },
+                'lineups': {
+                    'away': box['lineups'][0] if len(box['lineups']) > 0 else [],
+                    'home': box['lineups'][1] if len(box['lineups']) > 1 else []
+                },
+                'updated': datetime.now(KST).strftime('%H:%M:%S')
+            })
 
-    if has_data:
+    if gc and gc['status'] in ('pre', 'live'):
+        status_label = gc['status']
+        away_p = gc['away_pitcher']
+        home_p = gc['home_pitcher']
         return jsonify({
-            'game_id':  game_id,
-            'away':     away_name,
-            'home':     home_name,
-            'status':   'live',
+            'game_id': game_id, 'away': away_name, 'home': home_name,
+            'status': status_label,
             'pitchers': {
-                'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
-                'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
+                'away': [{'name': away_p, 'timing': '선발' if status_label == 'pre' else '현재', 'result': ''}] if away_p else [],
+                'home': [{'name': home_p, 'timing': '선발' if status_label == 'pre' else '현재', 'result': ''}] if home_p else []
             },
-            'lineups': {
-                'away': box['lineups'][0] if len(box['lineups']) > 0 else [],
-                'home': box['lineups'][1] if len(box['lineups']) > 1 else []
-            },
+            'lineups': {'away': [], 'home': []},
             'updated': datetime.now(KST).strftime('%H:%M:%S')
         })
-    else:
-        away_starter, home_starter = get_starter_pitchers(today, game_id)
-        return jsonify({
-            'game_id':  game_id,
-            'away':     away_name,
-            'home':     home_name,
-            'status':   'pre',
-            'pitchers': {
-                'away': [{'name': away_starter, 'timing': '선발', 'result': ''}] if away_starter else [],
-                'home': [{'name': home_starter, 'timing': '선발', 'result': ''}] if home_starter else []
-            },
-            'lineups':  {'away': [], 'home': []},
-            'updated':  datetime.now(KST).strftime('%H:%M:%S')
-        })
+
+    return jsonify({
+        'game_id': game_id, 'away': away_name, 'home': home_name,
+        'status': 'unknown',
+        'pitchers': {'away': [], 'home': []},
+        'lineups':  {'away': [], 'home': []},
+        'updated':  datetime.now(KST).strftime('%H:%M:%S')
+    })
 
 
 @app.route('/api/ranking')
 def team_ranking():
-    """팀 순위 API"""
     ranking = get_team_ranking()
-    return jsonify({
-        'ranking': ranking,
-        'updated': datetime.now(KST).strftime('%H:%M:%S')
-    })
+    return jsonify({'ranking': ranking, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
 @app.route('/api/debug/chrome')

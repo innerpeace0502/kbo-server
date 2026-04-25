@@ -1,3 +1,4 @@
+# test_lineup.py
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -15,15 +16,14 @@ options.add_argument('--disable-gpu')
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 try:
-    # 모바일 팀 순위 페이지
-    url = 'https://m.koreabaseball.com/Kbo/TeamRank.aspx'
+    # 문자중계 페이지 시도
+    url = 'https://www.koreabaseball.com/Schedule/GameCenter/LiveText.aspx?gameId=20260425KTSK0&leId=1&srId=0'
     driver.get(url)
     WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-    time.sleep(2)
-
+    time.sleep(3)
     body = driver.find_element(By.TAG_NAME, 'body').text
     lines = [l.strip() for l in body.split('\n') if l.strip()]
-    for i, line in enumerate(lines[:50]):
+    for i, line in enumerate(lines[:80]):
         print(f'{i:3d}: {line}')
 finally:
     driver.quit()
