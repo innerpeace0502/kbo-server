@@ -12,23 +12,20 @@ CORS(app)
 
 KST = timezone(timedelta(hours=9))
 
-# ─────────────────────────────────────────
-# 전역 캐시
-# ─────────────────────────────────────────
 _ranking_cache      = []
 _ranking_cache_time = 0
-
 _gameinfo_cache      = {}
 _gameinfo_cache_time = {}
-
 _scores_cache      = []
 _scores_cache_time = 0
+_recent_cache      = {}
+_recent_cache_time = {}
 
 channel_map = {
     "genie": {
-        "spotv": "51", "spotv2": "52", "kbs_n_sports": "133",
-        "mbc_sports": "130", "sbs_sports": "131",
-        "kbs2": "7", "mbc": "11", "sbs": "13",
+        "spotv": "51", "spotv2": "52", "kbs_n_sports": "59",
+        "mbc_sports": "60", "sbs_sports": "58",
+        "kbs2": "7", "mbc": "11", "sbs": "5",
     },
     "Uplus": {
         "spotv": "107", "spotv2": "108", "kbs_n_sports": "133",
@@ -125,7 +122,6 @@ def _get_schedule_rows(today):
 
 
 def get_kbo_schedule(date_str):
-    year  = date_str[:4]
     month = date_str[4:6]
     day   = date_str[6:8]
     target_date = f"{month}.{day}"
@@ -257,7 +253,6 @@ def _get_gamecenter_lines(today):
 
 
 def get_live_scores():
-    """실시간 스코어 (2분 캐시)"""
     global _scores_cache, _scores_cache_time
     now = time_module.time()
     if _scores_cache and now - _scores_cache_time < 120:
@@ -269,7 +264,7 @@ def get_live_scores():
         driver = _get_selenium_driver()
     except Exception as e:
         print(f"[Selenium 초기화 오류] {e}")
-        return _scores_cache  # 캐시라도 반환
+        return _scores_cache
 
     scores = []
     try:
@@ -311,23 +306,24 @@ def get_live_scores():
                     continue
 
                 elif '경기종료' in status_line:
-                    # [경기종료] [원정점수] [VS] [홈점수]
-                    if i + 4 < len(lines):
-                        s1 = lines[i + 3]
-                        s2 = lines[i + 4]
-                        s3 = lines[i + 5] if i + 5 < len(lines) else ''
-                        if 'VS' in s2.upper() and s1.isdigit() and s3.isdigit():
-                            if teams:
-                                scores.append({
-                                    'away': teams[0], 'home': teams[1],
-                                    'away_score': s1, 'home_score': s3,
-                                    'status': '2', 'inning': '경기종료'
-                                })
-                    i += 8
+                    vs_idx = None
+                    for k in range(i+3, min(i+10, len(lines))):
+                        if lines[k].upper() == 'VS':
+                            vs_idx = k
+                            break
+                    if vs_idx and vs_idx > i+3:
+                        away_score = lines[i+3]
+                        home_score = lines[vs_idx+1] if vs_idx+1 < len(lines) else ''
+                        if away_score.isdigit() and home_score.isdigit() and teams:
+                            scores.append({
+                                'away': teams[0], 'home': teams[1],
+                                'away_score': away_score, 'home_score': home_score,
+                                'status': '2', 'inning': '경기종료'
+                            })
+                    i += 10
                     continue
 
                 elif re.match(r'\d+회[초말]', status_line):
-                    # [이닝] [원정점수] [원정투수/타자] [VS] [홈점수] [홈투수/타자]
                     if i + 6 < len(lines):
                         away_score = lines[i + 3]
                         vs_line    = lines[i + 5]
@@ -337,8 +333,7 @@ def get_live_scores():
                             if teams:
                                 scores.append({
                                     'away': teams[0], 'home': teams[1],
-                                    'away_score': away_score,
-                                    'home_score': home_score,
+                                    'away_score': away_score, 'home_score': home_score,
                                     'status': '1', 'inning': status_line
                                 })
                                 i += 8
@@ -392,7 +387,6 @@ def get_game_id(today):
 
 
 def get_pitcher_from_gamecenter(today, game_id):
-    """게임센터에서 투수/타자 정보 파싱 (2분 캐시)"""
     global _gameinfo_cache, _gameinfo_cache_time
     now = time_module.time()
     cache_key = game_id
@@ -439,10 +433,38 @@ def get_pitcher_from_gamecenter(today, game_id):
                         return result
 
             elif '경기종료' in status_line:
+                # ✅ 경기종료: VS 위치 동적 탐색 후 승/패/세 파싱
+                vs_idx = None
+                for k in range(i+3, min(i+12, len(lines))):
+                    if lines[k].upper() == 'VS':
+                        vs_idx = k
+                        break
+
+                away_pitchers = []
+                home_pitchers = []
+
+                if vs_idx:
+                    for k in range(i+4, vs_idx):
+                        raw = lines[k]
+                        if not raw or raw[0] not in ('승','패','세','홀'):
+                            break
+                        prefix = raw[0]
+                        name   = raw[1:].strip()
+                        label  = {'승':'승','패':'패','세':'세','홀':'홀'}.get(prefix, prefix)
+                        away_pitchers.append({'label': label, 'name': name})
+                    for k in range(vs_idx+2, min(vs_idx+6, len(lines))):
+                        raw = lines[k]
+                        if not raw or raw[0] not in ('승','패','세','홀'):
+                            break
+                        prefix = raw[0]
+                        name   = raw[1:].strip()
+                        label  = {'승':'승','패':'패','세':'세','홀':'홀'}.get(prefix, prefix)
+                        home_pitchers.append({'label': label, 'name': name})
+
                 result = {
                     'status': 'ended',
-                    'away_pitcher': '',
-                    'home_pitcher': '',
+                    'away_pitchers': away_pitchers,
+                    'home_pitchers': home_pitchers,
                 }
                 _gameinfo_cache[cache_key] = result
                 _gameinfo_cache_time[cache_key] = time_module.time()
@@ -458,17 +480,15 @@ def get_pitcher_from_gamecenter(today, game_id):
                         away_clean = re.sub(r'^(승|패|홀드|세)', '', away_raw).strip()
                         home_clean = re.sub(r'^(승|패|홀드|세)', '', home_raw).strip()
                         if is_top:
-                            # 회초: 원정팀 공격(타), 홈팀 수비(투)
-                            away_p = f'타 {away_clean}'
-                            home_p = f'투 {home_clean}'
+                            away_p = {'label': '타', 'name': away_clean}
+                            home_p = {'label': '투', 'name': home_clean}
                         else:
-                            # 회말: 원정팀 수비(투), 홈팀 공격(타)
-                            away_p = f'투 {away_clean}'
-                            home_p = f'타 {home_clean}'
+                            away_p = {'label': '투', 'name': away_clean}
+                            home_p = {'label': '타', 'name': home_clean}
                         result = {
                             'status': 'live',
-                            'away_pitcher': away_p,
-                            'home_pitcher': home_p,
+                            'away_pitchers': [away_p],
+                            'home_pitchers': [home_p],
                         }
                         _gameinfo_cache[cache_key] = result
                         _gameinfo_cache_time[cache_key] = time_module.time()
@@ -481,56 +501,7 @@ def get_pitcher_from_gamecenter(today, game_id):
     return None
 
 
-def get_box_score(game_id, today):
-    year = today[:4]
-    data = {'gameId': game_id, 'leId': '1', 'srId': '0', 'seasonId': year}
-    try:
-        res = requests.post(
-            'https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll',
-            headers=_get_kbo_headers(), data=data, timeout=10
-        )
-        result = res.json()
-        if result.get('code') != '100':
-            return None
-
-        pitchers = []
-        for team in result.get('arrPitcher', []):
-            table = json_module.loads(team['table'])
-            team_pitchers = []
-            for row in table['rows']:
-                cells = row['row']
-                team_pitchers.append({
-                    'name':   cells[0]['Text'],
-                    'timing': cells[1]['Text'],
-                    'result': cells[2]['Text'].replace('&nbsp;', '')
-                })
-            pitchers.append(team_pitchers)
-
-        lineups = []
-        for team in result.get('arrHitter', []):
-            table = json_module.loads(team['table1'])
-            seen = set()
-            team_lineup = []
-            for row in table['rows']:
-                cells = row['row']
-                order = cells[0]['Text']
-                if order not in seen:
-                    seen.add(order)
-                    team_lineup.append({
-                        'order': order,
-                        'pos':   cells[1]['Text'],
-                        'name':  cells[2]['Text']
-                    })
-            lineups.append(team_lineup)
-
-        return {'pitchers': pitchers, 'lineups': lineups}
-    except Exception as e:
-        print(f"[박스스코어 오류] {e}")
-        return None
-
-
 def get_team_ranking():
-    """팀 순위 (10분 캐시)"""
     global _ranking_cache, _ranking_cache_time
     now = time_module.time()
     if _ranking_cache and now - _ranking_cache_time < 600:
@@ -584,7 +555,75 @@ def get_team_ranking():
 
     except Exception as e:
         print(f"[순위 오류] {e}")
-        return _ranking_cache  # 오류 시 캐시라도 반환
+        return _ranking_cache
+
+
+def get_recent_games(team):
+    global _recent_cache, _recent_cache_time
+    now = time_module.time()
+    if team in _recent_cache and now - _recent_cache_time.get(team, 0) < 600:
+        print(f"[최근경기] 캐시 반환: {team}")
+        return _recent_cache[team]
+
+    try:
+        today = get_game_date()
+        year  = today[:4]
+        month = today[4:6]
+
+        TEAM_ID_MAP = {
+            'LG': '2', 'KT': '12', 'SSG': '9', 'NC': '11',
+            '두산': '6', 'KIA': '3', '롯데': '5',
+            '삼성': '7', '한화': '8', '키움': '10'
+        }
+        team_id = TEAM_ID_MAP.get(team, '')
+        if not team_id:
+            return []
+
+        headers = _get_kbo_headers()
+        results = []
+        for m in [month, f'{int(month)-1:02d}']:
+            if int(m) < 1:
+                continue
+            data = {
+                'leId': '1', 'srIdList': '0,9',
+                'seasonId': year, 'year': year,
+                'month': m, 'gameMonth': m, 'teamId': team_id
+            }
+            try:
+                res = requests.post(
+                    'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+                    headers=headers, data=data, timeout=10
+                )
+                rows = res.json().get('rows', [])
+                for row_obj in rows:
+                    row = row_obj.get('row', [])
+                    cells = [strip_html(c.get('Text', '')) for c in row]
+                    result_cell = next((c for c in cells if c in ('W','L','D','승','패','무','취','우천')), None)
+                    if result_cell:
+                        results.append(result_cell)
+            except Exception:
+                pass
+
+        recent = []
+        for r in reversed(results):
+            if r in ('W', '승'):
+                recent.append('승')
+            elif r in ('L', '패'):
+                recent.append('패')
+            elif r in ('D', '무'):
+                recent.append('무')
+            if len(recent) >= 10:
+                break
+
+        recent = list(reversed(recent))
+
+        _recent_cache[team] = recent
+        _recent_cache_time[team] = time_module.time()
+        return recent
+
+    except Exception as e:
+        print(f"[최근경기 오류] {e}")
+        return []
 
 
 # ─────────────────────────────────────────
@@ -700,67 +739,36 @@ def game_info():
     home_name = CODE_TEAM.get(home_code, home_code)
 
     gc = get_pitcher_from_gamecenter(today, game_id)
-
-    if gc and gc['status'] == 'ended':
-        box = get_box_score(game_id, today)
-        if box and len(box.get('pitchers', [])) > 0:
-            return jsonify({
-                'game_id': game_id, 'away': away_name, 'home': home_name,
-                'status': 'ended',
-                'pitchers': {
-                    'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
-                    'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
-                },
-                'lineups': {
-                    'away': box['lineups'][0] if len(box['lineups']) > 0 else [],
-                    'home': box['lineups'][1] if len(box['lineups']) > 1 else []
-                },
-                'updated': datetime.now(KST).strftime('%H:%M:%S')
-            })
-
-    if gc and gc['status'] in ('pre', 'live'):
-        away_p = gc['away_pitcher']
-        home_p = gc['home_pitcher']
-        timing = '선발' if gc['status'] == 'pre' else '현재'
+    if not gc:
         return jsonify({
             'game_id': game_id, 'away': away_name, 'home': home_name,
-            'status': gc['status'],
-            'pitchers': {
-                'away': [{'name': away_p, 'timing': timing, 'result': ''}] if away_p else [],
-                'home': [{'name': home_p, 'timing': timing, 'result': ''}] if home_p else []
-            },
-            'lineups': {'away': [], 'home': []},
+            'status': 'unknown',
+            'away_pitchers': [], 'home_pitchers': [],
             'updated': datetime.now(KST).strftime('%H:%M:%S')
         })
 
     return jsonify({
         'game_id': game_id, 'away': away_name, 'home': home_name,
-        'status': 'unknown',
-        'pitchers': {'away': [], 'home': []},
-        'lineups':  {'away': [], 'home': []},
-        'updated':  datetime.now(KST).strftime('%H:%M:%S')
+        'status': gc['status'],
+        'away_pitchers': gc.get('away_pitchers', []),
+        'home_pitchers': gc.get('home_pitchers', []),
+        'updated': datetime.now(KST).strftime('%H:%M:%S')
     })
 
 
 @app.route('/api/ranking')
 def team_ranking():
-    """팀 순위 (10분 캐시)"""
     ranking = get_team_ranking()
     return jsonify({'ranking': ranking, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
-@app.route('/api/debug/chrome')
-def debug_chrome():
-    import subprocess
-    paths = ['/usr/bin/chromium', '/usr/bin/chromedriver', '/usr/bin/chromium-browser']
-    result = {p: os.path.exists(p) for p in paths}
-    for cmd in ['chromium', 'chromedriver']:
-        try:
-            out = subprocess.check_output(['which', cmd], stderr=subprocess.DEVNULL).decode().strip()
-            result[f'which_{cmd}'] = out
-        except Exception:
-            result[f'which_{cmd}'] = 'not found'
-    return jsonify(result)
+@app.route('/api/recent')
+def recent_games():
+    team = request.args.get('team', '')
+    if not team:
+        return jsonify({'error': '팀명을 입력해주세요'}), 400
+    recent = get_recent_games(team)
+    return jsonify({'team': team, 'recent': recent, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
 if __name__ == '__main__':
