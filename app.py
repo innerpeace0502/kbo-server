@@ -88,10 +88,8 @@ def parse_teams_from_score(text):
     clean = re.sub(r'\d+', '', text)
     parts = re.split(r'vs', clean, flags=re.IGNORECASE)
     if len(parts) == 2:
-        away = parts[0].strip()
-        home = parts[1].strip()
-        away_team = next((t for t in KBO_TEAMS if t in away), away)
-        home_team = next((t for t in KBO_TEAMS if t in home), home)
+        away_team = next((t for t in KBO_TEAMS if t in parts[0].strip()), None)
+        home_team = next((t for t in KBO_TEAMS if t in parts[1].strip()), None)
         if away_team and home_team:
             return away_team, home_team
     return None, None
@@ -234,9 +232,11 @@ def _get_selenium_driver():
     chromedriver_paths = ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']
     for cd_path in chromedriver_paths:
         if os.path.exists(cd_path):
+            from selenium.webdriver.chrome.service import Service
             return webdriver.Chrome(service=Service(cd_path), options=options)
 
     from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.webdriver.chrome.service import Service
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
 
@@ -273,7 +273,6 @@ def get_live_scores():
                     if i + 2 < len(lines):
                         status_line = lines[i + 2]
                         if '경기예정' in status_line:
-                            # 경기 전 → 스코어 없음 (status 0)
                             teams = stadium_team_map.get(stadium_match)
                             if teams:
                                 scores.append({
@@ -424,12 +423,10 @@ def get_starter_pitchers(today, game_id):
                     if i + 5 < len(lines):
                         status_line = lines[i + 2]
                         if '경기예정' in status_line:
-                            # [구장] [채널] [경기예정] [선원정투수] [VS] [선홈투수]
                             away_raw = lines[i + 3]
                             vs_check = lines[i + 4]
                             home_raw = lines[i + 5]
                         elif i + 7 < len(lines):
-                            # [구장] [채널] [이닝] [원정점수] [원정투수] [VS] [홈점수] [홈투수]
                             away_raw = lines[i + 4]
                             vs_check = lines[i + 5]
                             home_raw = lines[i + 6]
@@ -451,6 +448,63 @@ def get_starter_pitchers(today, game_id):
     except Exception as e:
         print(f"[선발투수 파싱 오류] {e}")
         return '', ''
+
+
+def get_team_ranking():
+    """KBO 모바일에서 팀 순위 크롤링"""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import time
+
+    try:
+        driver = _get_selenium_driver()
+        driver.get('https://m.koreabaseball.com/Kbo/TeamRank.aspx')
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        time.sleep(2)
+
+        body  = driver.find_element(By.TAG_NAME, 'body').text
+        driver.quit()
+
+        lines = [l.strip() for l in body.split('\n') if l.strip()]
+
+        teams_order = []
+        stats_list  = []
+
+        for line in lines:
+            m = re.match(r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)$', line)
+            if m:
+                teams_order.append({'rank': m.group(1), 'team': m.group(2)})
+            s = re.match(r'^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([-\d.]+)\s+(.+)$', line)
+            if s:
+                stats_list.append({
+                    'games':  s.group(1), 'win':    s.group(2),
+                    'lose':   s.group(3), 'draw':   s.group(4),
+                    'pct':    s.group(5), 'gb':     s.group(6),
+                    'streak': s.group(7)
+                })
+
+        ranking = []
+        for i, t in enumerate(teams_order):
+            stat = stats_list[i] if i < len(stats_list) else {}
+            ranking.append({
+                'rank':   t['rank'],
+                'team':   t['team'],
+                'games':  stat.get('games', ''),
+                'win':    stat.get('win', ''),
+                'lose':   stat.get('lose', ''),
+                'draw':   stat.get('draw', ''),
+                'pct':    stat.get('pct', ''),
+                'gb':     stat.get('gb', ''),
+                'streak': stat.get('streak', '')
+            })
+
+        return ranking
+
+    except Exception as e:
+        print(f"[순위 오류] {e}")
+        return []
 
 
 # ─────────────────────────────────────────
@@ -486,7 +540,7 @@ def get_logo(team):
     draw.ellipse([0, 0, size - 1, size - 1], fill=color)
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
-    except:
+    except Exception:
         font = ImageFont.load_default()
     text = team[:2]
     bbox = draw.textbbox((0, 0), text, font=font)
@@ -515,7 +569,7 @@ def schedule_by_date(date):
     team = request.args.get('team')
     try:
         d = datetime.strptime(date, '%Y%m%d')
-    except:
+    except Exception:
         return jsonify({'오류': '날짜 형식은 YYYYMMDD 입니다'}), 400
     games = get_kbo_schedule(date)
     if team:
@@ -555,12 +609,6 @@ def game_info():
     game_ids = get_game_id(today)
     if not game_ids:
         return jsonify({'error': '오늘 경기 없음'}), 404
-            ranking = get_team_ranking()
-    ranking_map = {r['team']: r for r in ranking}
-
-    away_rank = ranking_map.get(away_name, {})
-    home_rank = ranking_map.get(home_name, {})
-    
 
     if team and team in game_ids:
         game_id = game_ids[team]
@@ -574,7 +622,6 @@ def game_info():
 
     box = get_box_score(game_id, today)
 
-    # 박스스코어에 실제 데이터가 있으면 경기 중/후
     has_data = (box is not None and
                 len(box.get('pitchers', [])) > 0 and
                 len(box['pitchers'][0]) > 0)
@@ -585,8 +632,6 @@ def game_info():
             'away':     away_name,
             'home':     home_name,
             'status':   'live',
-            'away_rank': away_rank,
-            'home_rank': home_rank,
             'pitchers': {
                 'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
                 'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
@@ -603,8 +648,6 @@ def game_info():
             'game_id':  game_id,
             'away':     away_name,
             'home':     home_name,
-            'away_rank': away_rank,
-            'home_rank': home_rank,
             'status':   'pre',
             'pitchers': {
                 'away': [{'name': away_starter, 'timing': '선발', 'result': ''}] if away_starter else [],
@@ -613,6 +656,16 @@ def game_info():
             'lineups':  {'away': [], 'home': []},
             'updated':  datetime.now(KST).strftime('%H:%M:%S')
         })
+
+
+@app.route('/api/ranking')
+def team_ranking():
+    """팀 순위 API"""
+    ranking = get_team_ranking()
+    return jsonify({
+        'ranking': ranking,
+        'updated': datetime.now(KST).strftime('%H:%M:%S')
+    })
 
 
 @app.route('/api/debug/chrome')
@@ -630,7 +683,7 @@ def debug_chrome():
         try:
             out = subprocess.check_output(['which', cmd], stderr=subprocess.DEVNULL).decode().strip()
             result[f'which_{cmd}'] = out
-        except:
+        except Exception:
             result[f'which_{cmd}'] = 'not found'
     return jsonify(result)
 
@@ -638,56 +691,11 @@ def debug_chrome():
 @app.route('/api/debug/raw')
 def debug_raw():
     try:
-        today = datetime.now(KST).strftime('%Y%m%d')
+        today  = datetime.now(KST).strftime('%Y%m%d')
         result = _get_schedule_rows(today)
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)})
-
-def get_team_ranking():
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    import time
-    try:
-        driver = _get_selenium_driver()
-        driver.get('https://m.koreabaseball.com/Kbo/TeamRank.aspx')
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        time.sleep(2)
-        body = driver.find_element(By.TAG_NAME, 'body').text
-        driver.quit()
-        lines = [l.strip() for l in body.split('\n') if l.strip()]
-        teams_order = []
-        stats_list  = []
-        for line in lines:
-            m = re.match(r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)$', line)
-            if m:
-                teams_order.append({'rank': m.group(1), 'team': m.group(2)})
-            s = re.match(r'^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([-\d.]+)\s+(.+)$', line)
-            if s:
-                stats_list.append({
-                    'games': s.group(1), 'win': s.group(2), 'lose': s.group(3),
-                    'draw': s.group(4), 'pct': s.group(5), 'gb': s.group(6), 'streak': s.group(7)
-                })
-        ranking = []
-        for i, t in enumerate(teams_order):
-            stat = stats_list[i] if i < len(stats_list) else {}
-            ranking.append({
-                'rank': t['rank'], 'team': t['team'],
-                'games': stat.get('games',''), 'win': stat.get('win',''),
-                'lose': stat.get('lose',''), 'draw': stat.get('draw',''),
-                'pct': stat.get('pct',''), 'gb': stat.get('gb',''),
-                'streak': stat.get('streak','')
-            })
-        return ranking
-    except Exception as e:
-        print(f"[순위 오류] {e}")
-        return []
-
-@app.route('/api/ranking')
-def team_ranking():
-    ranking = get_team_ranking()
-    return jsonify({'ranking': ranking, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
 if __name__ == '__main__':
