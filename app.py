@@ -708,7 +708,6 @@ def game_info():
     team  = request.args.get('team', '')
     today = get_game_date()
 
-    # 오늘 경기 gameId 가져오기
     game_ids = get_game_id(today)
     if not game_ids:
         return jsonify({'error': '오늘 경기 없음'}), 404
@@ -728,26 +727,30 @@ def game_info():
     away_name = CODE_TEAM.get(away_code, away_code)
     home_name = CODE_TEAM.get(home_code, home_code)
 
-    # 박스스코어 조회 시도
     box = get_box_score(game_id, today)
 
-    # 박스스코어에 데이터가 있는지 확인 (경기 시작 후)
-    has_data = (box and
-                len(box.get('pitchers', {}).get('away', [])) > 0)
+    # ✅ pitchers는 리스트 [away_list, home_list]
+    has_data = (box is not None and
+                len(box.get('pitchers', [])) > 0 and
+                len(box['pitchers'][0]) > 0)
 
     if has_data:
-        # ✅ 경기 중/후: 박스스코어에서 실제 투수 + 라인업
         return jsonify({
             'game_id':  game_id,
             'away':     away_name,
             'home':     home_name,
             'status':   'live',
-            'pitchers': box['pitchers'],
-            'lineups':  box['lineups'],
-            'updated':  datetime.now(KST).strftime('%H:%M:%S')
+            'pitchers': {
+                'away': box['pitchers'][0] if len(box['pitchers']) > 0 else [],
+                'home': box['pitchers'][1] if len(box['pitchers']) > 1 else []
+            },
+            'lineups': {
+                'away': box['lineups'][0] if len(box['lineups']) > 0 else [],
+                'home': box['lineups'][1] if len(box['lineups']) > 1 else []
+            },
+            'updated': datetime.now(KST).strftime('%H:%M:%S')
         })
     else:
-        # ✅ 경기 전: 게임센터 메인에서 선발투수만 파싱
         away_starter, home_starter = get_starter_pitchers(today, game_id)
         return jsonify({
             'game_id':  game_id,
@@ -780,7 +783,7 @@ def get_starter_pitchers(today, game_id):
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
 
-        chromium_paths   = ['/usr/bin/chromium', '/usr/bin/chromium-browser']
+        chromium_paths    = ['/usr/bin/chromium', '/usr/bin/chromium-browser']
         chromedriver_paths = ['/usr/bin/chromedriver']
 
         for path in chromium_paths:
@@ -798,7 +801,7 @@ def get_starter_pitchers(today, game_id):
             driver = webdriver.Chrome(
                 service=Service(ChromeDriverManager().install()), options=options)
 
-        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}&gameId={game_id}&section=LIVE'
+        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
         driver.get(url)
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.TAG_NAME, 'body')))
@@ -809,37 +812,51 @@ def get_starter_pitchers(today, game_id):
 
         lines = [l.strip() for l in body_text.split('\n') if l.strip()]
 
-        # 해당 game_id의 경기 위치 찾기
         STADIUMS = ['잠실','문학','광주','고척','대전','수원','사직','창원','대구','인천','청주']
         stadium_team_map = _get_today_stadium_map(today)
 
+        CODE_TEAM = {
+            'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
+            'OB':'두산','HT':'KIA','LT':'롯데',
+            'SS':'삼성','HH':'한화','WO':'키움'
+        }
+        away_code = game_id[8:10]
+        target_away = CODE_TEAM.get(away_code, '')
+
         i = 0
-        while i < len(lines):
-            line = lines[i]
-            stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
-            if stadium_match and re.search(r'\d{2}:\d{2}', line):
-                if i + 6 < len(lines):
-                    inning_str = lines[i + 2]
-                    away_pitcher_raw = lines[i + 4] if i + 4 < len(lines) else ''
-                    home_pitcher_raw = lines[i + 6] if i + 6 < len(lines) else ''
+while i < len(lines):
+    line = lines[i]
+    stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
+    if stadium_match and re.search(r'\d{2}:\d{2}', line):
+        teams = stadium_team_map.get(stadium_match)
+        if teams and teams[0] == target_away:
+            if i + 5 < len(lines):
+    status_line = lines[i + 2]
 
-                    # 승/패/홀드 제거
-                    away_pitcher = re.sub(r'^(승|패|홀드|세)', '', away_pitcher_raw).strip()
-                    home_pitcher = re.sub(r'^(승|패|홀드|세)', '', home_pitcher_raw).strip()
-
-                    teams = stadium_team_map.get(stadium_match)
-                    if teams:
-                        away, home = teams
-                        # game_id의 팀과 매칭
-                        CODE_TEAM = {
-                            'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
-                            'OB':'두산','HT':'KIA','LT':'롯데',
-                            'SS':'삼성','HH':'한화','WO':'키움'
-                        }
-                        away_code = game_id[8:10]
-                        if CODE_TEAM.get(away_code) == away:
-                            return away_pitcher, home_pitcher
+    if '경기예정' in status_line:
+        # 경기 전: [구장] [채널] [경기예정] [선원정투수] [VS] [선홈투수]
+        away_pitcher_raw = lines[i + 3]
+        home_pitcher_raw = lines[i + 5]
+        vs_check = lines[i + 4]
+    else:
+        # 경기 중/후: [구장] [채널] [이닝] [원정점수] [원정투수] [VS] [홈점수] [홈투수]
+        if i + 7 < len(lines):
+            away_pitcher_raw = lines[i + 4]
+            home_pitcher_raw = lines[i + 6]
+            vs_check = lines[i + 5]
+        else:
             i += 1
+            continue
+
+    if 'VS' not in vs_check.upper():
+        i += 1
+        continue
+
+    away_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', away_pitcher_raw).strip()
+    home_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', home_pitcher_raw).strip()
+
+    return away_pitcher, home_pitcher
+    i += 1
 
         return '', ''
 
