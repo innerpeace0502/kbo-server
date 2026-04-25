@@ -1,139 +1,84 @@
 from flask import Flask, jsonify, request, send_from_directory, send_file
 from flask_cors import CORS
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import requests
 import re
 import os
+import json as json_module
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
-KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
+KST = timezone(timedelta(hours=9))
 
 channel_map = {
-    "genie": {  # KT 지니TV
-        "spotv":        "51",
-        "spotv2":       "52",
-        "kbs_n_sports": "133",
-        "mbc_sports":   "130",
-        "sbs_sports":   "131",
-        "kbs2":         "7",
-        "mbc":          "11",
-        "sbs":          "13",
+    "genie": {
+        "spotv": "51", "spotv2": "52", "kbs_n_sports": "133",
+        "mbc_sports": "130", "sbs_sports": "131",
+        "kbs2": "7", "mbc": "11", "sbs": "13",
     },
-    "Uplus": {  # LG U플러스
-        "spotv":        "107",
-        "spotv2":       "108",
-        "kbs_n_sports": "133",
-        "mbc_sports":   "130",
-        "sbs_sports":   "131",
-        "kbs2":         "7",
-        "mbc":          "11",
-        "sbs":          "13",
+    "Uplus": {
+        "spotv": "107", "spotv2": "108", "kbs_n_sports": "133",
+        "mbc_sports": "130", "sbs_sports": "131",
+        "kbs2": "7", "mbc": "11", "sbs": "13",
     },
-    "btv": {   # SK BTV
-        "spotv":        "986",
-        "spotv2":       "982",
-        "kbs_n_sports": "977",
-        "mbc_sports":   "978",
-        "sbs_sports":   "979",
-        "kbs2":         "7",
-        "mbc":          "11",
-        "sbs":          "13",
+    "btv": {
+        "spotv": "986", "spotv2": "982", "kbs_n_sports": "977",
+        "mbc_sports": "978", "sbs_sports": "979",
+        "kbs2": "7", "mbc": "11", "sbs": "13",
     }
 }
 
-BROADCAST_MAP = {
-    "SPO-T":   "spotv",
-    "SPO-2T":  "spotv2",
-    "KN-T":    "kbs_n_sports",
-    "MBC-SP":  "mbc_sports",
-    "MS-T":    "mbc_sports",
-    "SS-T":    "sbs_sports",   # ✅ SBS스포츠 추가
-    "S-T":     "sbs",          # ✅ SBS 추가
-    "M-T":     "mbc",          # ✅ MBC 추가
-    "K-2T":    "kbs2",         # ✅ KBS2 추가
-    "TVING":   "tving",
-}
+KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
 
-TEAM_LOGOS_SVG = {
-    "LG": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#C30452"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="32" fill="white" text-anchor="middle">LG</text>
-    </svg>''',
-    "KT": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#E31E26"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="32" fill="white" text-anchor="middle">KT</text>
-    </svg>''',
-    "SSG": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#CE0E2D"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">SSG</text>
-    </svg>''',
-    "NC": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#071D49"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="32" fill="white" text-anchor="middle">NC</text>
-    </svg>''',
-    "두산": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#131230"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">두산</text>
-    </svg>''',
-    "KIA": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#EA0029"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">KIA</text>
-    </svg>''',
-    "롯데": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#041E42"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">롯데</text>
-    </svg>''',
-    "삼성": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#0055A8"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">삼성</text>
-    </svg>''',
-    "한화": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#FF6600"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">한화</text>
-    </svg>''',
-    "키움": '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-        <circle cx="50" cy="50" r="50" fill="#820024"/>
-        <text x="50" y="62" font-family="Arial" font-weight="bold" font-size="28" fill="white" text-anchor="middle">키움</text>
-    </svg>'''
+BROADCAST_MAP = {
+    "SPO-T":  "spotv",
+    "SPO-2T": "spotv2",
+    "KN-T":   "kbs_n_sports",
+    "MBC-SP": "mbc_sports",
+    "MS-T":   "mbc_sports",
+    "SS-T":   "sbs_sports",
+    "S-T":    "sbs",
+    "M-T":    "mbc",
+    "K-2T":   "kbs2",
+    "TVING":  "tving",
 }
 
 LOGO_FILES = {
-    "LG":  "lg.png",
-    "KT":  "kt.png",
-    "SSG": "ssg.png",
-    "NC":  "nc.png",
-    "두산": "doosan.png",
-    "KIA": "kia.png",
-    "롯데": "lotte.png",
-    "삼성": "samsung.png",
-    "한화": "hanwha.png",
+    "LG":  "lg.png",  "KT":  "kt.png",  "SSG": "ssg.png",
+    "NC":  "nc.png",  "두산": "doosan.png", "KIA": "kia.png",
+    "롯데": "lotte.png", "삼성": "samsung.png", "한화": "hanwha.png",
     "키움": "kiwoom.png"
 }
+
+CODE_TEAM = {
+    'LG': 'LG', 'KT': 'KT', 'SK': 'SSG', 'NC': 'NC',
+    'OB': '두산', 'HT': 'KIA', 'LT': '롯데',
+    'SS': '삼성', 'HH': '한화', 'WO': '키움'
+}
+
+TEAM_CODE = {
+    'LG': 'LG', 'KT': 'KT', 'SSG': 'SK', 'NC': 'NC',
+    '두산': 'OB', 'KIA': 'HT', '롯데': 'LT',
+    '삼성': 'SS', '한화': 'HH', '키움': 'WO'
+}
+
+STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주']
 
 
 def get_logo_url(team):
     base = "https://web-production-6aae76.up.railway.app"
     return f"{base}/logos/{team}"
 
-from datetime import datetime, timezone, timedelta
-
-KST = timezone(timedelta(hours=9))
 
 def get_game_date():
-    """
-    경기 날짜 기준: 새벽 4시 이전은 전날 날짜 반환
-    예) 4/19 새벽 3시 → 4/18 날짜 반환 (전날 경기 결과 유지)
-        4/19 새벽 4시 이후 → 4/19 날짜 반환
-    """
     now = datetime.now(KST)
     if now.hour < 4:
-        # 자정~새벽 4시는 전날 날짜
         game_date = now - timedelta(days=1)
     else:
         game_date = now
     return game_date.strftime('%Y%m%d')
+
 
 def strip_html(text):
     return re.sub(r'<[^>]+>', '', text).strip()
@@ -152,57 +97,58 @@ def parse_teams_from_score(text):
     return None, None
 
 
-def get_kbo_schedule(date_str):
-    year  = date_str[:4]
-    month = date_str[4:6]
-    day   = date_str[6:8]
-    target_date = f"{month}.{day}"
-
-    url = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"
-    headers = {
+def _get_kbo_schedule_headers():
+    return {
         'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://www.koreabaseball.com/Schedule/Schedule.aspx',
+        'Referer': 'https://www.koreabaseball.com/',
         'X-Requested-With': 'XMLHttpRequest',
         'Content-Type': 'application/x-www-form-urlencoded'
     }
+
+
+def _get_schedule_rows(today):
+    year = today[:4]
+    month = today[4:6]
+    headers = _get_kbo_schedule_headers()
     data = {
         'leId': '1', 'srIdList': '0,9',
         'seasonId': year, 'year': year,
         'month': month, 'gameMonth': month, 'teamId': ''
     }
+    res = requests.post(
+        'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+        headers=headers, data=data, timeout=10
+    )
+    return res.json()
 
+
+def get_kbo_schedule(date_str):
+    year  = date_str[:4]
+    month = date_str[4:6]
+    day   = date_str[6:8]
+    target_date = f"{month}.{day}"
     try:
-        res = requests.post(url, headers=headers, data=data, timeout=10)
-        res.encoding = 'utf-8'
-        result = res.json()
+        result = _get_schedule_rows(date_str)
         games = []
         current_date = ""
-
         for row_obj in result.get('rows', []):
             row = row_obj.get('row', [])
             if not row:
                 continue
             cells = [strip_html(cell.get('Text', '')) for cell in row]
-
             for cell in cells:
                 if re.match(r'\d{2}\.\d{2}', cell) and len(cell) <= 8:
                     current_date = cell[:5]
                     break
-
             if target_date not in current_date:
                 continue
-
-            time_text = next(
-                (c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '시간미정'
-            )
-
+            time_text = next((c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '시간미정')
             away_text = home_text = ''
             for cell in cells:
                 if 'vs' in cell.lower():
                     away_text, home_text = parse_teams_from_score(cell)
                     if away_text and home_text:
                         break
-
             broadcast = ''
             for cell in cells:
                 for code in BROADCAST_MAP:
@@ -211,10 +157,8 @@ def get_kbo_schedule(date_str):
                         break
                 if broadcast:
                     break
-
-            STADIUMS = ['잠실', '수원', '창원', '대구', '광주', '인천', '문학', '대전', '사직', '고척', '청주']
-            stadium_text = next((c for c in cells if any(s in c for s in STADIUMS)), '')
-
+            STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주']
+            stadium_text = next((c for c in cells if any(s in c for s in STAD_LIST)), '')
             if away_text and home_text:
                 games.append({
                     'time':      time_text,
@@ -225,40 +169,20 @@ def get_kbo_schedule(date_str):
                     'away_logo': get_logo_url(away_text),
                     'home_logo': get_logo_url(home_text)
                 })
-
         return games
-
     except Exception as e:
-        print(f"[오류] {e}")
+        print(f"[스케줄 오류] {e}")
         return []
 
 
 def _get_today_stadium_map(today):
-    """KBO API에서 오늘 경기 구장-팀 매핑 가져오기"""
     stadium_map = {}
     try:
-        year  = today[:4]
+        result = _get_schedule_rows(today)
         month = today[4:6]
-        headers = {
-            'User-Agent': 'Mozilla/5.0',
-            'Referer': 'https://www.koreabaseball.com/',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-        data = {
-            'leId': '1', 'srIdList': '0,9',
-            'seasonId': year, 'year': year,
-            'month': month, 'gameMonth': month, 'teamId': ''
-        }
-        res = requests.post(
-            'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
-            headers=headers, data=data, timeout=10
-        )
-        result = res.json()
         target_date = f"{month}.{today[6:8]}"
         current_date = ''
-        STADIUMS = ['잠실', '수원', '창원', '대구', '광주', '인천', '대전', '사직', '고척', '청주']
-
+        STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주']
         for row_obj in result.get('rows', []):
             row = row_obj.get('row', [])
             for cell in row:
@@ -266,47 +190,33 @@ def _get_today_stadium_map(today):
                     current_date = re.sub(r'<[^>]+>', '', cell.get('Text', '')).strip()[:5]
             if target_date not in current_date:
                 continue
-
             play_cell = next((c for c in row if c.get('Class') == 'play'), None)
             if not play_cell:
                 continue
-
             play_text = play_cell.get('Text', '')
             teams = re.findall(r'<span(?:[^>]*)>(.*?)</span>', play_text)
             teams = [t for t in teams if t and 'vs' not in t.lower()]
             if len(teams) < 2:
                 continue
-
             away = next((t for t in KBO_TEAMS if t in teams[0]), None)
             home = next((t for t in KBO_TEAMS if t in teams[-1]), None)
             if not away or not home:
                 continue
-
             for cell in row:
                 cell_text = re.sub(r'<[^>]+>', '', cell.get('Text', '')).strip()
-                for s in STADIUMS:
+                for s in STAD_LIST:
                     if s in cell_text:
                         stadium_map[s] = (away, home)
                         break
-
     except Exception as e:
         print(f"[구장맵 오류] {e}")
-
     return stadium_map
 
 
-def get_live_scores():
-    """Selenium으로 KBO 게임센터에서 실시간 스코어 크롤링"""
+def _get_selenium_driver():
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-    import time
-
-    today = get_game_date()
-    STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주']
 
     options = Options()
     options.add_argument('--headless')
@@ -315,47 +225,30 @@ def get_live_scores():
     options.add_argument('--disable-gpu')
     options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
 
-    # 가능한 Chromium 바이너리 경로 (Railway Nix 우선)
-    chromium_paths = [
-        '/nix/var/nix/profiles/default/bin/chromium',
-        '/usr/bin/chromium',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/google-chrome',
-    ]
-    # 가능한 chromedriver 경로 (Railway Nix 우선)
-    chromedriver_paths = [
-        '/nix/var/nix/profiles/default/bin/chromedriver',
-        '/usr/bin/chromedriver',
-        '/usr/lib/chromium/chromedriver',
-    ]
-
-    # Chromium 바이너리 경로 자동 탐색
+    chromium_paths = ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome']
     for path in chromium_paths:
         if os.path.exists(path):
             options.binary_location = path
-            print(f"[Chromium] {path}")
             break
 
+    chromedriver_paths = ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']
+    for cd_path in chromedriver_paths:
+        if os.path.exists(cd_path):
+            return webdriver.Chrome(service=Service(cd_path), options=options)
+
+    from webdriver_manager.chrome import ChromeDriverManager
+    return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+
+def get_live_scores():
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import time
+
+    today = get_game_date()
     try:
-        driver = None
-        # chromedriver 경로 자동 탐색
-        for cd_path in chromedriver_paths:
-            if os.path.exists(cd_path):
-                print(f"[chromedriver] {cd_path}")
-                driver = webdriver.Chrome(
-                    service=Service(cd_path),
-                    options=options
-                )
-                break
-
-        # 로컬 환경: webdriver-manager 사용
-        if driver is None:
-            from webdriver_manager.chrome import ChromeDriverManager
-            driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=options
-            )
-
+        driver = _get_selenium_driver()
     except Exception as e:
         print(f"[Selenium 초기화 오류] {e}")
         return []
@@ -364,63 +257,54 @@ def get_live_scores():
     try:
         url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
         driver.get(url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, 'body'))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
         time.sleep(3)
 
         body_text = driver.find_element(By.TAG_NAME, 'body').text
-        lines     = [l.strip() for l in body_text.split('\n') if l.strip()]
-
-        # 오늘 경기 구장-팀 매핑
+        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
         stadium_team_map = _get_today_stadium_map(today)
 
-        # 패턴 파싱:
-        # [구장+시간] [채널] [이닝] [원정점수] [원정투수] [VS] [홈점수] [홈투수]
         i = 0
         while i < len(lines):
             line = lines[i]
-
-            # 구장+시간 패턴 감지 (예: "잠실18:30")
             stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
             if stadium_match and re.search(r'\d{2}:\d{2}', line):
                 try:
-                    if i + 7 < len(lines):
-                        inning_str = lines[i + 2]
-                        away_score = lines[i + 3]
-                        vs_line    = lines[i + 5]
-                        home_score = lines[i + 6]
-
-                        # 유효성 검사
-                        if not re.match(r'\d+회[초말]|종료|경기종료|경기전', inning_str):
-                            i += 1
+                    if i + 2 < len(lines):
+                        status_line = lines[i + 2]
+                        if '경기예정' in status_line:
+                            # 경기 전 → 스코어 없음 (status 0)
+                            teams = stadium_team_map.get(stadium_match)
+                            if teams:
+                                scores.append({
+                                    'away': teams[0], 'home': teams[1],
+                                    'away_score': '', 'home_score': '',
+                                    'status': '0', 'inning': ''
+                                })
+                            i += 6
                             continue
-                        if not away_score.isdigit() or not home_score.isdigit():
-                            i += 1
-                            continue
-                        if 'VS' not in vs_line.upper():
-                            i += 1
-                            continue
-
-                        teams = stadium_team_map.get(stadium_match)
-                        if teams:
-                            away, home = teams
-                            status = '2' if '종료' in inning_str else '1'
-                            scores.append({
-                                'away':       away,
-                                'home':       home,
-                                'away_score': away_score,
-                                'home_score': home_score,
-                                'status':     status,
-                                'inning':     inning_str
-                            })
-                            i += 8
-                            continue
+                        elif re.match(r'\d+회[초말]|경기종료', status_line):
+                            if i + 7 < len(lines):
+                                away_score = lines[i + 3]
+                                vs_line    = lines[i + 5]
+                                home_score = lines[i + 6]
+                                if (away_score.isdigit() and home_score.isdigit()
+                                        and 'VS' in vs_line.upper()):
+                                    teams = stadium_team_map.get(stadium_match)
+                                    if teams:
+                                        status = '2' if '종료' in status_line else '1'
+                                        scores.append({
+                                            'away': teams[0], 'home': teams[1],
+                                            'away_score': away_score,
+                                            'home_score': home_score,
+                                            'status': status,
+                                            'inning': status_line
+                                        })
+                                        i += 8
+                                        continue
                 except Exception as e:
                     print(f"[파싱 오류] {e}")
-
             i += 1
-
     except Exception as e:
         print(f"[Selenium 오류] {e}")
     finally:
@@ -429,13 +313,153 @@ def get_live_scores():
     return scores
 
 
+def get_game_id(today):
+    game_ids = {}
+    try:
+        result = _get_schedule_rows(today)
+        month = today[4:6]
+        target_date = f"{month}.{today[6:8]}"
+        current_date = ''
+        for row_obj in result.get('rows', []):
+            row = row_obj.get('row', [])
+            for cell in row:
+                if cell.get('Class') == 'day':
+                    current_date = re.sub(r'<[^>]+>', '', cell.get('Text', '')).strip()[:5]
+            if target_date not in current_date:
+                continue
+            play_cell = next((c for c in row if c.get('Class') == 'play'), None)
+            if not play_cell:
+                continue
+            play_text = play_cell.get('Text', '')
+            teams = re.findall(r'<span(?:[^>]*)>(.*?)</span>', play_text)
+            teams = [t for t in teams if t and 'vs' not in t.lower()]
+            if len(teams) < 2:
+                continue
+            away = next((t for t in KBO_TEAMS if t in teams[0]), None)
+            home = next((t for t in KBO_TEAMS if t in teams[-1]), None)
+            if away and home:
+                game_id = f'{today}{TEAM_CODE[away]}{TEAM_CODE[home]}0'
+                game_ids[away] = game_id
+                game_ids[home] = game_id
+    except Exception as e:
+        print(f"[gameId 오류] {e}")
+    return game_ids
+
+
+def get_box_score(game_id, today):
+    year = today[:4]
+    headers = _get_kbo_schedule_headers()
+    data = {'gameId': game_id, 'leId': '1', 'srId': '0', 'seasonId': year}
+    try:
+        res = requests.post(
+            'https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll',
+            headers=headers, data=data, timeout=10
+        )
+        result = res.json()
+
+        pitchers = []
+        for team in result.get('arrPitcher', []):
+            table = json_module.loads(team['table'])
+            team_pitchers = []
+            for row in table['rows']:
+                cells = row['row']
+                name        = cells[0]['Text']
+                timing      = cells[1]['Text']
+                result_text = cells[2]['Text'].replace('&nbsp;', '')
+                team_pitchers.append({
+                    'name': name, 'timing': timing, 'result': result_text
+                })
+            pitchers.append(team_pitchers)
+
+        lineups = []
+        for team in result.get('arrHitter', []):
+            table = json_module.loads(team['table1'])
+            seen = set()
+            team_lineup = []
+            for row in table['rows']:
+                cells = row['row']
+                order = cells[0]['Text']
+                pos   = cells[1]['Text']
+                name  = cells[2]['Text']
+                if order not in seen:
+                    seen.add(order)
+                    team_lineup.append({'order': order, 'pos': pos, 'name': name})
+            lineups.append(team_lineup)
+
+        return {'pitchers': pitchers, 'lineups': lineups}
+    except Exception as e:
+        print(f"[박스스코어 오류] {e}")
+        return None
+
+
+def get_starter_pitchers(today, game_id):
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    import time
+
+    try:
+        driver = _get_selenium_driver()
+        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+        driver.get(url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        time.sleep(3)
+
+        body_text = driver.find_element(By.TAG_NAME, 'body').text
+        driver.quit()
+
+        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+        stadium_team_map = _get_today_stadium_map(today)
+
+        away_code   = game_id[8:10]
+        target_away = CODE_TEAM.get(away_code, '')
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
+            if stadium_match and re.search(r'\d{2}:\d{2}', line):
+                teams = stadium_team_map.get(stadium_match)
+                if teams and teams[0] == target_away:
+                    if i + 5 < len(lines):
+                        status_line = lines[i + 2]
+                        if '경기예정' in status_line:
+                            # [구장] [채널] [경기예정] [선원정투수] [VS] [선홈투수]
+                            away_raw = lines[i + 3]
+                            vs_check = lines[i + 4]
+                            home_raw = lines[i + 5]
+                        elif i + 7 < len(lines):
+                            # [구장] [채널] [이닝] [원정점수] [원정투수] [VS] [홈점수] [홈투수]
+                            away_raw = lines[i + 4]
+                            vs_check = lines[i + 5]
+                            home_raw = lines[i + 6]
+                        else:
+                            i += 1
+                            continue
+
+                        if 'VS' not in vs_check.upper():
+                            i += 1
+                            continue
+
+                        away_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', away_raw).strip()
+                        home_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', home_raw).strip()
+                        return away_pitcher, home_pitcher
+            i += 1
+
+        return '', ''
+
+    except Exception as e:
+        print(f"[선발투수 파싱 오류] {e}")
+        return '', ''
+
+
 # ─────────────────────────────────────────
 # Flask 라우트
 # ─────────────────────────────────────────
 
 @app.route('/')
 def home():
-    return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now().strftime('%Y-%m-%d %H:%M')})
+    return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now(KST).strftime('%Y-%m-%d %H:%M')})
 
 
 @app.route('/logos/<team>')
@@ -455,36 +479,30 @@ def get_logo(team):
         "롯데": (4, 30, 66),   "삼성": (0, 85, 168),  "한화": (255, 102, 0),
         "키움": (130, 0, 36)
     }
-
     color = team_colors.get(team, (68, 68, 68))
     size  = 120
-
-    img  = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    img   = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    draw  = ImageDraw.Draw(img)
     draw.ellipse([0, 0, size - 1, size - 1], fill=color)
-
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
     except:
         font = ImageFont.load_default()
-
     text = team[:2]
     bbox = draw.textbbox((0, 0), text, font=font)
-    tw   = bbox[2] - bbox[0]
-    th   = bbox[3] - bbox[1]
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
     draw.text(((size - tw) // 2, (size - th) // 2), text, fill=(255, 255, 255), font=font)
-
     img_data = io.BytesIO()
     img.save(img_data, format='PNG')
     img_data.seek(0)
-
     return send_file(img_data, mimetype='image/png')
 
 
 @app.route('/api/schedule/today')
 def today_schedule():
     team      = request.args.get('team')
-    today_str = get_game_date()          # ← datetime.today() 대신
+    today_str = get_game_date()
     today     = datetime.strptime(today_str, '%Y%m%d')
     games     = get_kbo_schedule(today_str)
     if team:
@@ -529,182 +547,8 @@ def live_scores():
     return jsonify({'scores': scores, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
 
 
-@app.route('/api/debug/raw')
-def debug_raw():
-    try:
-        today = datetime.now().strftime('%Y%m%d')
-        year  = today[:4]
-        month = today[4:6]
-        url   = "https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList"
-        headers = {
-            'User-Agent': 'Mozilla/5.0',
-            'Referer': 'https://www.koreabaseball.com/Schedule/Schedule.aspx',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-        data = {
-            'leId': '1', 'srIdList': '0,9',
-            'seasonId': year, 'year': year,
-            'month': month, 'gameMonth': month, 'teamId': ''
-        }
-        res = requests.post(url, headers=headers, data=data, timeout=10)
-        return jsonify(res.json())
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-@app.route('/api/debug/chrome')
-def debug_chrome():
-    """Railway에서 Chrome 경로 확인"""
-    import subprocess
-    paths_to_check = [
-        '/nix/var/nix/profiles/default/bin/chromium',
-        '/nix/var/nix/profiles/default/bin/chromedriver',
-        '/usr/bin/chromium',
-        '/usr/bin/chromedriver',
-        '/usr/bin/chromium-browser',
-    ]
-    result = {}
-    for path in paths_to_check:
-        result[path] = os.path.exists(path)
-
-    # which 명령어로 찾기
-    for cmd in ['chromium', 'chromedriver', 'google-chrome', 'chromium-browser']:
-        try:
-            out = subprocess.check_output(['which', cmd], stderr=subprocess.DEVNULL).decode().strip()
-            result[f'which_{cmd}'] = out
-        except:
-            result[f'which_{cmd}'] = 'not found'
-
-    # find로 chromedriver 찾기
-    try:
-        out = subprocess.check_output(['find', '/nix', '-name', 'chromedriver', '-type', 'f'],
-                                      stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-        result['find_nix_chromedriver'] = out if out else 'not found'
-    except:
-        result['find_nix_chromedriver'] = 'error'
-
-    return jsonify(result)
-
-def get_game_id(today):
-    """오늘 경기 gameId 목록 생성"""
-    year = today[:4]
-    month = today[4:6]
-    TEAM_CODE = {
-        'LG':'LG','KT':'KT','SSG':'SK','NC':'NC',
-        '두산':'OB','KIA':'HT','롯데':'LT',
-        '삼성':'SS','한화':'HH','키움':'WO'
-    }
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://www.koreabaseball.com/',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    data = {'leId':'1','srIdList':'0,9','seasonId':year,'year':year,
-            'month':month,'gameMonth':month,'teamId':''}
-    try:
-        res = requests.post(
-            'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
-            headers=headers, data=data, timeout=10
-        )
-        result = res.json()
-        target_date = f"{month}.{today[6:8]}"
-        current_date = ''
-        game_ids = {}
-
-        for row_obj in result.get('rows', []):
-            row = row_obj.get('row', [])
-            for cell in row:
-                if cell.get('Class') == 'day':
-                    current_date = re.sub(r'<[^>]+>','',cell.get('Text','')).strip()[:5]
-            if target_date not in current_date:
-                continue
-            play_cell = next((c for c in row if c.get('Class') == 'play'), None)
-            if not play_cell:
-                continue
-            play_text = play_cell.get('Text', '')
-            teams = re.findall(r'<span(?:[^>]*)>(.*?)</span>', play_text)
-            teams = [t for t in teams if t and 'vs' not in t.lower()]
-            if len(teams) < 2:
-                continue
-            away = next((t for t in KBO_TEAMS if t in teams[0]), None)
-            home = next((t for t in KBO_TEAMS if t in teams[-1]), None)
-            if away and home:
-                game_id = f'{today}{TEAM_CODE[away]}{TEAM_CODE[home]}0'
-                game_ids[away] = game_id
-                game_ids[home] = game_id
-        return game_ids
-    except Exception as e:
-        print(f"[gameId 오류] {e}")
-        return {}
-
-
-def get_box_score(game_id, today):
-    """박스스코어 API에서 투수/라인업 파싱"""
-    import json as json_module
-    year = today[:4]
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://www.koreabaseball.com/',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-    data = {'gameId': game_id, 'leId': '1', 'srId': '0', 'seasonId': year}
-    try:
-        res = requests.post(
-            'https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll',
-            headers=headers, data=data, timeout=10
-        )
-        result = res.json()
-
-        # 투수 파싱
-        pitchers = []
-        for i, team in enumerate(result.get('arrPitcher', [])):
-            table = json_module.loads(team['table'])
-            rows = table['rows']
-            team_pitchers = []
-            for row in rows:
-                cells = row['row']
-                name        = cells[0]['Text']
-                timing      = cells[1]['Text']
-                result_text = cells[2]['Text'].replace('&nbsp;', '')
-                team_pitchers.append({
-                    'name':   name,
-                    'timing': timing,
-                    'result': result_text
-                })
-            pitchers.append(team_pitchers)
-
-        # 라인업 파싱 (첫 번째 타순만)
-        lineups = []
-        for i, team in enumerate(result.get('arrHitter', [])):
-            table = json_module.loads(team['table1'])
-            rows = table['rows']
-            seen = set()
-            team_lineup = []
-            for row in rows:
-                cells = row['row']
-                order = cells[0]['Text']
-                pos   = cells[1]['Text']
-                name  = cells[2]['Text']
-                if order not in seen:
-                    seen.add(order)
-                    team_lineup.append({
-                        'order': order,
-                        'pos':   pos,
-                        'name':  name
-                    })
-            lineups.append(team_lineup)
-
-        return {'pitchers': pitchers, 'lineups': lineups}
-    except Exception as e:
-        print(f"[박스스코어 오류] {e}")
-        return None
-
-
 @app.route('/api/gameinfo')
 def game_info():
-    """투수 + 라인업 통합 API"""
     team  = request.args.get('team', '')
     today = get_game_date()
 
@@ -717,11 +561,6 @@ def game_info():
     else:
         game_id = list(game_ids.values())[0]
 
-    CODE_TEAM = {
-        'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
-        'OB':'두산','HT':'KIA','LT':'롯데',
-        'SS':'삼성','HH':'한화','WO':'키움'
-    }
     away_code = game_id[8:10]
     home_code = game_id[10:12]
     away_name = CODE_TEAM.get(away_code, away_code)
@@ -729,7 +568,7 @@ def game_info():
 
     box = get_box_score(game_id, today)
 
-    # ✅ pitchers는 리스트 [away_list, home_list]
+    # 박스스코어에 실제 데이터가 있으면 경기 중/후
     has_data = (box is not None and
                 len(box.get('pitchers', [])) > 0 and
                 len(box['pitchers'][0]) > 0)
@@ -766,103 +605,34 @@ def game_info():
         })
 
 
-def get_starter_pitchers(today, game_id):
-    """게임센터 메인 텍스트에서 선발투수 파싱 (경기 전)"""
+@app.route('/api/debug/chrome')
+def debug_chrome():
+    import subprocess
+    paths_to_check = [
+        '/nix/var/nix/profiles/default/bin/chromium',
+        '/nix/var/nix/profiles/default/bin/chromedriver',
+        '/usr/bin/chromium', '/usr/bin/chromedriver', '/usr/bin/chromium-browser',
+    ]
+    result = {}
+    for path in paths_to_check:
+        result[path] = os.path.exists(path)
+    for cmd in ['chromium', 'chromedriver', 'google-chrome', 'chromium-browser']:
+        try:
+            out = subprocess.check_output(['which', cmd], stderr=subprocess.DEVNULL).decode().strip()
+            result[f'which_{cmd}'] = out
+        except:
+            result[f'which_{cmd}'] = 'not found'
+    return jsonify(result)
+
+
+@app.route('/api/debug/raw')
+def debug_raw():
     try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        import time
-
-        options = Options()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-
-        chromium_paths    = ['/usr/bin/chromium', '/usr/bin/chromium-browser']
-        chromedriver_paths = ['/usr/bin/chromedriver']
-
-        for path in chromium_paths:
-            if os.path.exists(path):
-                options.binary_location = path
-                break
-
-        driver = None
-        for cd_path in chromedriver_paths:
-            if os.path.exists(cd_path):
-                driver = webdriver.Chrome(service=Service(cd_path), options=options)
-                break
-        if driver is None:
-            from webdriver_manager.chrome import ChromeDriverManager
-            driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()), options=options)
-
-        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-        driver.get(url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        time.sleep(3)
-
-        body_text = driver.find_element(By.TAG_NAME, 'body').text
-        driver.quit()
-
-        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-
-        STADIUMS = ['잠실','문학','광주','고척','대전','수원','사직','창원','대구','인천','청주']
-        stadium_team_map = _get_today_stadium_map(today)
-
-        CODE_TEAM = {
-            'LG':'LG','KT':'KT','SK':'SSG','NC':'NC',
-            'OB':'두산','HT':'KIA','LT':'롯데',
-            'SS':'삼성','HH':'한화','WO':'키움'
-        }
-        away_code = game_id[8:10]
-        target_away = CODE_TEAM.get(away_code, '')
-
-        i = 0
-while i < len(lines):
-    line = lines[i]
-    stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
-    if stadium_match and re.search(r'\d{2}:\d{2}', line):
-        teams = stadium_team_map.get(stadium_match)
-        if teams and teams[0] == target_away:
-            if i + 5 < len(lines):
-    status_line = lines[i + 2]
-
-    if '경기예정' in status_line:
-        # 경기 전: [구장] [채널] [경기예정] [선원정투수] [VS] [선홈투수]
-        away_pitcher_raw = lines[i + 3]
-        home_pitcher_raw = lines[i + 5]
-        vs_check = lines[i + 4]
-    else:
-        # 경기 중/후: [구장] [채널] [이닝] [원정점수] [원정투수] [VS] [홈점수] [홈투수]
-        if i + 7 < len(lines):
-            away_pitcher_raw = lines[i + 4]
-            home_pitcher_raw = lines[i + 6]
-            vs_check = lines[i + 5]
-        else:
-            i += 1
-            continue
-
-    if 'VS' not in vs_check.upper():
-        i += 1
-        continue
-
-    away_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', away_pitcher_raw).strip()
-    home_pitcher = re.sub(r'^(선|승|패|홀드|세)', '', home_pitcher_raw).strip()
-
-    return away_pitcher, home_pitcher
-    i += 1
-
-        return '', ''
-
+        today = datetime.now(KST).strftime('%Y%m%d')
+        result = _get_schedule_rows(today)
+        return jsonify(result)
     except Exception as e:
-        print(f"[선발투수 파싱 오류] {e}")
-        return '', ''
+        return jsonify({'error': str(e)})
 
 
 if __name__ == '__main__':
