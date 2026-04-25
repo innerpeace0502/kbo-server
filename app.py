@@ -569,25 +569,17 @@ def get_recent_games(team):
         today = get_game_date()
         year  = today[:4]
         month = today[4:6]
-
-        TEAM_ID_MAP = {
-            'LG': '2', 'KT': '12', 'SSG': '9', 'NC': '11',
-            '두산': '6', 'KIA': '3', '롯데': '5',
-            '삼성': '7', '한화': '8', '키움': '10'
-        }
-        team_id = TEAM_ID_MAP.get(team, '')
-        if not team_id:
-            return []
-
         headers = _get_kbo_headers()
         results = []
+
+        # ✅ teamId 없이 전체 조회 후 팀 이름으로 필터링
         for m in [month, f'{int(month)-1:02d}']:
             if int(m) < 1:
                 continue
             data = {
                 'leId': '1', 'srIdList': '0,9',
                 'seasonId': year, 'year': year,
-                'month': m, 'gameMonth': m, 'teamId': team_id
+                'month': m, 'gameMonth': m, 'teamId': ''
             }
             try:
                 res = requests.post(
@@ -598,24 +590,38 @@ def get_recent_games(team):
                 for row_obj in rows:
                     row = row_obj.get('row', [])
                     cells = [strip_html(c.get('Text', '')) for c in row]
-                    result_cell = next((c for c in cells if c in ('W','L','D','승','패','무','취','우천')), None)
-                    if result_cell:
-                        results.append(result_cell)
-            except Exception:
-                pass
+                    cells = [c for c in cells if c]
 
-        recent = []
-        for r in reversed(results):
-            if r in ('W', '승'):
-                recent.append('승')
-            elif r in ('L', '패'):
-                recent.append('패')
-            elif r in ('D', '무'):
-                recent.append('무')
-            if len(recent) >= 10:
-                break
+                    # ✅ 해당 팀이 포함된 경기 셀 찾기 (vs 포함)
+                    game_cell = next((c for c in cells
+                                     if 'vs' in c.lower() and team in c
+                                     and re.search(r'\d', c)), None)
+                    if not game_cell:
+                        continue
 
-        recent = list(reversed(recent))
+                    # ✅ 점수 파싱으로 승/패/무 판단
+                    # 예: 'KIA2vs7LG', 'LG7vs5두산'
+                    m2 = re.search(r'(.+?)(\d+)vs(\d+)(.+)', game_cell)
+                    if not m2:
+                        continue
+
+                    team1  = m2.group(1).strip()
+                    score1 = int(m2.group(2))
+                    score2 = int(m2.group(3))
+                    team2  = m2.group(4).strip()
+
+                    if team in team1:
+                        result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
+                    else:
+                        result = '승' if score2 > score1 else ('패' if score2 < score1 else '무')
+                    results.append(result)
+
+            except Exception as e:
+                print(f"[최근경기 월별 오류] {e}")
+
+        # ✅ 최근 10경기 (오래된→최근 순)
+        recent = results[-10:] if len(results) >= 10 else results
+        print(f"[최근경기] {team}: {recent}")
 
         _recent_cache[team] = recent
         _recent_cache_time[team] = time_module.time()

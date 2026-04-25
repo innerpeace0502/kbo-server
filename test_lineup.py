@@ -1,36 +1,63 @@
 # test_lineup.py
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-import time, re
+import requests, re
+from datetime import datetime, timezone, timedelta
 
-options = Options()
-options.add_argument('--headless')
-options.add_argument('--no-sandbox')
-options.add_argument('--disable-dev-shm-usage')
-options.add_argument('--disable-gpu')
-options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+KST = timezone(timedelta(hours=9))
+today = datetime.now(KST).strftime('%Y%m%d')
+year  = today[:4]
+month = today[4:6]
 
-driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-try:
-    # 내일 경기 미리 찾기 - Livesport KBO 페이지
-    url = 'https://www.livesport.com/kr/baseball/south-korea/kbo/'
-    driver.get(url)
-    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-    time.sleep(4)
+headers = {
+    'User-Agent': 'Mozilla/5.0',
+    'Referer': 'https://www.koreabaseball.com/',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
 
-    # 경기 링크 찾기
-    links = driver.find_elements(By.TAG_NAME, 'a')
-    game_links = [l.get_attribute('href') for l in links 
-                  if l.get_attribute('href') and 'kbo' in str(l.get_attribute('href'))
-                  and any(x in str(l.get_attribute('href')) for x in ['summary', 'lineup', 'match'])]
-    print('경기 링크들:')
-    for link in game_links[:10]:
-        print(f'  {link}')
+team = 'LG'
+results = []
 
-finally:
-    driver.quit()
+for m in [month, f'{int(month)-1:02d}']:
+    if int(m) < 1:
+        continue
+    data = {
+        'leId': '1', 'srIdList': '0,9',
+        'seasonId': year, 'year': year,
+        'month': m, 'gameMonth': m, 'teamId': ''
+    }
+    res = requests.post(
+        'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+        headers=headers, data=data, timeout=10
+    )
+    rows = res.json().get('rows', [])
+    print(f'{m}월: {len(rows)}개 row')
+
+    for row_obj in rows:
+        row = row_obj.get('row', [])
+        cells = [re.sub(r'<[^>]+>', '', c.get('Text', '')).strip() for c in row]
+        cells = [c for c in cells if c]
+
+        # LG 포함 경기 찾기
+        game_cell = next((c for c in cells if 'vs' in c.lower() and team in c), None)
+        if not game_cell:
+            continue
+
+        print(f'  경기: {cells}')
+
+        # 점수 파싱으로 승/패 판단
+        # 예: 'KIA2vs7LG' → KIA:2, LG:7 → LG 승
+        m2 = re.search(r'(\D+?)(\d+)vs(\d+)(\D+)', game_cell)
+        if m2:
+            team1     = m2.group(1).strip()
+            score1    = int(m2.group(2))
+            score2    = int(m2.group(3))
+            team2     = m2.group(4).strip()
+
+            if team in team1:
+                result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
+            else:
+                result = '승' if score2 > score1 else ('패' if score2 < score1 else '무')
+            results.append(result)
+            print(f'    → {team1}({score1}) vs {team2}({score2}) → {team} {result}')
+
+print(f'\n{team} 최근 결과: {results[-10:]}')
