@@ -1089,6 +1089,19 @@ def debug_scores():
 # ─────────────────────────────────────────
 _start_background()
 
+@app.route('/api/debug/gamecenter')
+def debug_gamecenter():
+    """Railway에서 게임센터 페이지를 제대로 읽는지 확인"""
+    today = get_game_date()
+    try:
+        lines = _get_gamecenter_lines(today)
+        return jsonify({
+            'today': today,
+            'line_count': len(lines),
+            'lines': lines[:30]  # 처음 30줄만
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'today': today})
 
 if __name__ == '__main__':
     # debug=True의 리로더는 모듈을 2번 import해 스케줄러가 중복 기동되므로 비활성화
