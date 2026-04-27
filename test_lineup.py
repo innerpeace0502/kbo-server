@@ -1,11 +1,5 @@
 # test_lineup.py
 import requests, re
-from datetime import datetime, timezone, timedelta
-
-KST = timezone(timedelta(hours=9))
-today = datetime.now(KST).strftime('%Y%m%d')
-year  = today[:4]
-month = today[4:6]
 
 headers = {
     'User-Agent': 'Mozilla/5.0',
@@ -14,50 +8,50 @@ headers = {
     'Content-Type': 'application/x-www-form-urlencoded'
 }
 
-team = 'LG'
-results = []
+from datetime import datetime, timezone, timedelta
+KST = timezone(timedelta(hours=9))
+today = datetime.now(KST).strftime('%Y%m%d')
+year = today[:4]
+month = today[4:6]
 
-for m in [month, f'{int(month)-1:02d}']:
-    if int(m) < 1:
+data = {
+    'leId': '1', 'srIdList': '0,9',
+    'seasonId': year, 'year': year,
+    'month': month, 'gameMonth': month, 'teamId': ''
+}
+res = requests.post(
+    'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+    headers=headers, data=data, timeout=10
+)
+result = res.json()
+target_date = f"{month}.{today[6:8]}"
+current_date = ''
+
+KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
+STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주']
+
+for row_obj in result.get('rows', []):
+    row = row_obj.get('row', [])
+    for cell in row:
+        if cell.get('Class') == 'day':
+            current_date = re.sub(r'<[^>]+>', '', cell.get('Text','')).strip()[:5]
+    if target_date not in current_date:
         continue
-    data = {
-        'leId': '1', 'srIdList': '0,9',
-        'seasonId': year, 'year': year,
-        'month': m, 'gameMonth': m, 'teamId': ''
-    }
-    res = requests.post(
-        'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
-        headers=headers, data=data, timeout=10
-    )
-    rows = res.json().get('rows', [])
-    print(f'{m}월: {len(rows)}개 row')
+    play_cell = next((c for c in row if c.get('Class') == 'play'), None)
+    if not play_cell:
+        continue
+    play_text = play_cell.get('Text', '')
+    teams = re.findall(r'<span(?:[^>]*)>(.*?)</span>', play_text)
+    teams = [t for t in teams if t and 'vs' not in t.lower()]
+    away = next((t for t in KBO_TEAMS if t in teams[0]), None) if teams else None
+    home = next((t for t in KBO_TEAMS if t in teams[-1]), None) if len(teams) > 1 else None
 
-    for row_obj in rows:
-        row = row_obj.get('row', [])
-        cells = [re.sub(r'<[^>]+>', '', c.get('Text', '')).strip() for c in row]
-        cells = [c for c in cells if c]
+    stadium = ''
+    for cell in row:
+        cell_text = re.sub(r'<[^>]+>', '', cell.get('Text', '')).strip()
+        for s in STAD_LIST:
+            if s in cell_text:
+                stadium = s
+                break
 
-        # LG 포함 경기 찾기
-        game_cell = next((c for c in cells if 'vs' in c.lower() and team in c), None)
-        if not game_cell:
-            continue
-
-        print(f'  경기: {cells}')
-
-        # 점수 파싱으로 승/패 판단
-        # 예: 'KIA2vs7LG' → KIA:2, LG:7 → LG 승
-        m2 = re.search(r'(\D+?)(\d+)vs(\d+)(\D+)', game_cell)
-        if m2:
-            team1     = m2.group(1).strip()
-            score1    = int(m2.group(2))
-            score2    = int(m2.group(3))
-            team2     = m2.group(4).strip()
-
-            if team in team1:
-                result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
-            else:
-                result = '승' if score2 > score1 else ('패' if score2 < score1 else '무')
-            results.append(result)
-            print(f'    → {team1}({score1}) vs {team2}({score2}) → {team} {result}')
-
-print(f'\n{team} 최근 결과: {results[-10:]}')
+    print(f'구장:{stadium} away:{away} home:{home}')

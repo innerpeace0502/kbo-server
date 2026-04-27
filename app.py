@@ -6,12 +6,20 @@ import re
 import os
 import json as json_module
 import time as time_module
+import threading
+import atexit
+import gzip
+import hashlib
+import random
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
 KST = timezone(timedelta(hours=9))
 
+# ─────────────────────────────────────────
+# 전역 캐시 (기존 변수명/구조 유지)
+# ─────────────────────────────────────────
 _ranking_cache      = []
 _ranking_cache_time = 0
 _gameinfo_cache      = {}
@@ -21,11 +29,49 @@ _scores_cache_time = 0
 _recent_cache      = {}
 _recent_cache_time = {}
 
+# ─────────────────────────────────────────
+# 내부 공유 캐시 / 동기화 객체 (신규)
+# ─────────────────────────────────────────
+# GameCenter 페이지 파싱 결과 (lines + stadium_map) 공유 캐시
+_gc_snapshot       = {}   # {today: {'lines': [...], 'stadium_map': {...}}}
+_gc_snapshot_time  = {}   # {today: ts}
+_gc_snapshot_lock  = threading.Lock()
+
+# KBO 스케줄 POST JSON 월별 캐시
+_schedule_rows_cache = {}  # {(year, month): data}
+_schedule_rows_time  = {}
+_schedule_rows_lock  = threading.Lock()
+
+# Selenium 드라이버 싱글톤 (RLock: _fetch_body_text 내에서 _ensure_driver 재진입)
+_driver      = None
+_driver_lock = threading.RLock()
+
+# 백그라운드 프리워밍 기동 플래그
+_bg_started      = False
+_bg_started_lock = threading.Lock()
+
+# 캐시 TTL (초)
+_TTL_GC_SNAPSHOT = 45
+_TTL_SCORES      = 120
+_TTL_GAMEINFO    = 120
+_TTL_RANKING     = 600
+_TTL_RECENT      = 600
+_TTL_SCHEDULE    = 300
+
+
+# ─────────────────────────────────────────
+# 채널 정보 (원본 그대로)
+# ─────────────────────────────────────────
 channel_map = {
     "genie": {
-        "spotv": "51", "spotv2": "52", "kbs_n_sports": "59",
-        "mbc_sports": "60", "sbs_sports": "58",
-        "kbs2": "7", "mbc": "11", "sbs": "5",
+        "spotv":        "51",
+        "spotv2":       "52",
+        "kbs_n_sports": "59",
+        "mbc_sports":   "60",
+        "sbs_sports":   "58",
+        "kbs2":         "7",
+        "mbc":          "11",
+        "sbs":          "5",
     },
     "Uplus": {
         "spotv": "107", "spotv2": "108", "kbs_n_sports": "133",
@@ -71,6 +117,10 @@ TEAM_CODE = {
 STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주']
 
 
+# ─────────────────────────────────────────
+# 유틸 함수
+# ─────────────────────────────────────────
+
 def get_logo_url(team):
     return f"https://web-production-6aae76.up.railway.app/logos/{team}"
 
@@ -106,19 +156,170 @@ def _get_kbo_headers():
     }
 
 
+def _fmt_ts(ts):
+    """캐시 갱신 시각을 HH:MM:SS로. 없으면 현재 시각."""
+    if not ts:
+        return datetime.now(KST).strftime('%H:%M:%S')
+    return datetime.fromtimestamp(ts, KST).strftime('%H:%M:%S')
+
+
+# ─────────────────────────────────────────
+# Selenium 공통 헬퍼 (싱글톤 + 조건부 대기)
+# ─────────────────────────────────────────
+
+def _ensure_driver():
+    """드라이버 싱글톤 보장. 호출자는 _driver_lock을 이미 보유해야 함."""
+    global _driver
+    if _driver is not None:
+        try:
+            _ = _driver.current_url
+            return _driver
+        except Exception:
+            try:
+                _driver.quit()
+            except Exception:
+                pass
+            _driver = None
+
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service as S
+
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.add_argument('user-agent=Mozilla/5.0')
+
+    for path in ['/usr/bin/chromium', '/usr/bin/chromium-browser']:
+        if os.path.exists(path):
+            options.binary_location = path
+            break
+
+    driver = None
+    for cd in ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']:
+        if os.path.exists(cd):
+            driver = webdriver.Chrome(service=S(cd), options=options)
+            break
+
+    if driver is None:
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(service=S(ChromeDriverManager().install()), options=options)
+
+    _driver = driver
+    return _driver
+
+
+def _get_selenium_driver():
+    """하위 호환용: 기존 코드가 이 이름을 import할 수도 있어 유지."""
+    with _driver_lock:
+        return _ensure_driver()
+
+
+def _cleanup_driver():
+    global _driver
+    with _driver_lock:
+        if _driver is not None:
+            try:
+                _driver.quit()
+            except Exception:
+                pass
+            _driver = None
+
+
+atexit.register(_cleanup_driver)
+
+
+def _fetch_body_text(url, wait_patterns=None, max_wait=12):
+    """Selenium 페이지를 가져와 body 텍스트 반환. 드라이버 재사용 + 직렬화.
+
+    wait_patterns: 특정 문자열 패턴(하나 이상)이 body에 등장할 때까지 대기.
+    고정 sleep 대신 이걸로 대기하면 평균 2~3초 단축된다.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    def _do_fetch(driver):
+        driver.get(url)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+        if wait_patterns:
+            compiled = [re.compile(p) for p in wait_patterns]
+
+            def _ready(d):
+                try:
+                    t = d.find_element(By.TAG_NAME, 'body').text
+                except Exception:
+                    return False
+                return any(r.search(t) for r in compiled)
+
+            try:
+                WebDriverWait(driver, max_wait).until(_ready)
+            except Exception:
+                pass  # 조건 못 만나도 현재까지의 body 반환
+        return driver.find_element(By.TAG_NAME, 'body').text
+
+    with _driver_lock:
+        try:
+            driver = _ensure_driver()
+            return _do_fetch(driver)
+        except Exception as e:
+            print(f"[Selenium 1차 실패] {e}")
+
+        global _driver
+        if _driver is not None:
+            try:
+                _driver.quit()
+            except Exception:
+                pass
+            _driver = None
+        try:
+            driver = _ensure_driver()
+            return _do_fetch(driver)
+        except Exception as e:
+            print(f"[Selenium 2차 실패] {e}")
+            return None
+
+
+# ─────────────────────────────────────────
+# 스케줄 API 호출 (월별 캐시)
+# ─────────────────────────────────────────
+
 def _get_schedule_rows(today):
     year = today[:4]
     month = today[4:6]
+    key = (year, month)
+    now = time_module.time()
+
+    with _schedule_rows_lock:
+        cached = _schedule_rows_cache.get(key)
+        cached_ts = _schedule_rows_time.get(key, 0)
+        if cached and now - cached_ts < _TTL_SCHEDULE:
+            return cached
+
     data = {
         'leId': '1', 'srIdList': '0,9',
         'seasonId': year, 'year': year,
         'month': month, 'gameMonth': month, 'teamId': ''
     }
-    res = requests.post(
-        'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
-        headers=_get_kbo_headers(), data=data, timeout=10
-    )
-    return res.json()
+    try:
+        res = requests.post(
+            'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+            headers=_get_kbo_headers(), data=data, timeout=10
+        )
+        result = res.json()
+    except Exception as e:
+        print(f"[스케줄 fetch 오류] {e}")
+        with _schedule_rows_lock:
+            return _schedule_rows_cache.get(key, {'rows': []})
+
+    with _schedule_rows_lock:
+        _schedule_rows_cache[key] = result
+        _schedule_rows_time[key] = time_module.time()
+    return result
 
 
 def get_kbo_schedule(date_str):
@@ -145,8 +346,9 @@ def get_kbo_schedule(date_str):
             away_text = home_text = ''
             for cell in cells:
                 if 'vs' in cell.lower():
-                    away_text, home_text = parse_teams_from_score(cell)
-                    if away_text and home_text:
+                    result2 = parse_teams_from_score(cell)
+                    if result2[0] and result2[1]:
+                        away_text, home_text = result2
                         break
             broadcast = ''
             for cell in cells:
@@ -171,6 +373,7 @@ def get_kbo_schedule(date_str):
 
 
 def _get_today_stadium_map(today):
+    """구장명 → (away팀, home팀) 매핑"""
     stadium_map = {}
     try:
         result = _get_schedule_rows(today)
@@ -197,10 +400,17 @@ def _get_today_stadium_map(today):
             home = next((t for t in KBO_TEAMS if t in teams[-1]), None)
             if not away or not home:
                 continue
+
+            all_text = re.sub(r'<[^>]+>', '', play_text).strip()
+            for s in STAD_LIST:
+                if s in all_text:
+                    stadium_map[s] = (away, home)
+                    break
+
             for cell in row:
                 cell_text = re.sub(r'<[^>]+>', '', cell.get('Text', '')).strip()
                 for s in STAD_LIST:
-                    if s in cell_text:
+                    if s in cell_text and s not in stadium_map:
                         stadium_map[s] = (away, home)
                         break
     except Exception as e:
@@ -208,79 +418,67 @@ def _get_today_stadium_map(today):
     return stadium_map
 
 
-def _get_selenium_driver():
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
+# ─────────────────────────────────────────
+# GameCenter 스냅샷 (lines + stadium_map) 공유
+# ─────────────────────────────────────────
 
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('user-agent=Mozilla/5.0')
+def _get_gamecenter_snapshot(today, force=False):
+    global _gc_snapshot, _gc_snapshot_time
+    now = time_module.time()
 
-    for path in ['/usr/bin/chromium', '/usr/bin/chromium-browser']:
-        if os.path.exists(path):
-            options.binary_location = path
-            break
+    if not force:
+        with _gc_snapshot_lock:
+            cached = _gc_snapshot.get(today)
+            cached_ts = _gc_snapshot_time.get(today, 0)
+            if cached and now - cached_ts < _TTL_GC_SNAPSHOT:
+                return cached
 
-    for cd in ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']:
-        if os.path.exists(cd):
-            from selenium.webdriver.chrome.service import Service as S
-            return webdriver.Chrome(service=S(cd), options=options)
+    url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+    body_text = _fetch_body_text(
+        url,
+        wait_patterns=[r'경기예정', r'경기종료', r'\d+회[초말]']
+    )
+    if body_text is None:
+        with _gc_snapshot_lock:
+            return _gc_snapshot.get(today)
 
-    from webdriver_manager.chrome import ChromeDriverManager
-    from selenium.webdriver.chrome.service import Service as S
-    return webdriver.Chrome(service=S(ChromeDriverManager().install()), options=options)
+    lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+    stadium_map = _get_today_stadium_map(today)
+
+    snapshot = {'lines': lines, 'stadium_map': stadium_map}
+    with _gc_snapshot_lock:
+        _gc_snapshot[today] = snapshot
+        _gc_snapshot_time[today] = time_module.time()
+    return snapshot
 
 
 def _get_gamecenter_lines(today):
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
-    driver = _get_selenium_driver()
-    try:
-        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-        driver.get(url)
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        time_module.sleep(3)
-        body_text = driver.find_element(By.TAG_NAME, 'body').text
-        return [l.strip() for l in body_text.split('\n') if l.strip()]
-    finally:
-        driver.quit()
+    """기존 이름 유지. 내부적으로는 스냅샷 라인만 반환."""
+    snap = _get_gamecenter_snapshot(today)
+    return snap['lines'] if snap else []
 
 
-def get_live_scores():
+# ─────────────────────────────────────────
+# 라이브 스코어 / 경기 정보 / 순위 / 최근전적
+# ─────────────────────────────────────────
+
+def get_live_scores(force=False):
+    """실시간 스코어 (GameCenter 스냅샷 공유)"""
     global _scores_cache, _scores_cache_time
     now = time_module.time()
-    if _scores_cache and now - _scores_cache_time < 120:
-        print("[스코어] 캐시 반환")
+    if not force and _scores_cache and now - _scores_cache_time < _TTL_SCORES:
         return _scores_cache
 
     today = get_game_date()
-    try:
-        driver = _get_selenium_driver()
-    except Exception as e:
-        print(f"[Selenium 초기화 오류] {e}")
+    snap = _get_gamecenter_snapshot(today, force=force)
+    if not snap:
         return _scores_cache
+
+    lines = snap['lines']
+    stadium_team_map = snap['stadium_map']
 
     scores = []
     try:
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-
-        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-        driver.get(url)
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        time_module.sleep(3)
-
-        body_text = driver.find_element(By.TAG_NAME, 'body').text
-        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
-        stadium_team_map = _get_today_stadium_map(today)
-
         i = 0
         while i < len(lines):
             line = lines[i]
@@ -288,12 +486,14 @@ def get_live_scores():
             if not (stadium_match and re.search(r'\d{2}:\d{2}', line)):
                 i += 1
                 continue
+
+            teams = stadium_team_map.get(stadium_match)
+
             try:
                 if i + 2 >= len(lines):
                     i += 1
                     continue
                 status_line = lines[i + 2]
-                teams = stadium_team_map.get(stadium_match)
 
                 if '경기예정' in status_line:
                     if teams:
@@ -307,11 +507,11 @@ def get_live_scores():
 
                 elif '경기종료' in status_line:
                     vs_idx = None
-                    for k in range(i+3, min(i+10, len(lines))):
-                        if lines[k].upper() == 'VS':
+                    for k in range(i+3, min(i+12, len(lines))):
+                        if lines[k].strip().upper() == 'VS':
                             vs_idx = k
                             break
-                    if vs_idx and vs_idx > i+3:
+                    if vs_idx:
                         away_score = lines[i+3]
                         home_score = lines[vs_idx+1] if vs_idx+1 < len(lines) else ''
                         if away_score.isdigit() and home_score.isdigit() and teams:
@@ -338,14 +538,13 @@ def get_live_scores():
                                 })
                                 i += 8
                                 continue
+
             except Exception as e:
                 print(f"[파싱 오류] {e}")
             i += 1
 
     except Exception as e:
-        print(f"[Selenium 오류] {e}")
-    finally:
-        driver.quit()
+        print(f"[스코어 파싱 오류] {e}")
 
     if scores:
         _scores_cache = scores
@@ -386,18 +585,21 @@ def get_game_id(today):
     return game_ids
 
 
-def get_pitcher_from_gamecenter(today, game_id):
+def get_pitcher_from_gamecenter(today, game_id, force=False):
+    """게임센터에서 투수/타자 정보 파싱 (스냅샷 공유)"""
     global _gameinfo_cache, _gameinfo_cache_time
     now = time_module.time()
     cache_key = game_id
 
-    if cache_key in _gameinfo_cache and now - _gameinfo_cache_time.get(cache_key, 0) < 120:
-        print(f"[gameinfo] 캐시 반환: {cache_key}")
+    if not force and cache_key in _gameinfo_cache and now - _gameinfo_cache_time.get(cache_key, 0) < _TTL_GAMEINFO:
         return _gameinfo_cache[cache_key]
 
     try:
-        lines = _get_gamecenter_lines(today)
-        stadium_team_map = _get_today_stadium_map(today)
+        snap = _get_gamecenter_snapshot(today, force=force)
+        if not snap:
+            return _gameinfo_cache.get(cache_key)
+        lines = snap['lines']
+        stadium_team_map = snap['stadium_map']
         away_code   = game_id[8:10]
         target_away = CODE_TEAM.get(away_code, '')
 
@@ -425,15 +627,14 @@ def get_pitcher_from_gamecenter(today, game_id):
                     if 'VS' in vs_check.upper():
                         result = {
                             'status': 'pre',
-                            'away_pitcher': re.sub(r'^선', '', away_raw).strip(),
-                            'home_pitcher': re.sub(r'^선', '', home_raw).strip(),
+                            'away_pitchers': [{'label': '선발', 'name': re.sub(r'^선', '', away_raw).strip()}],
+                            'home_pitchers': [{'label': '선발', 'name': re.sub(r'^선', '', home_raw).strip()}],
                         }
                         _gameinfo_cache[cache_key] = result
                         _gameinfo_cache_time[cache_key] = time_module.time()
                         return result
 
             elif '경기종료' in status_line:
-                # ✅ 경기종료: VS 위치 동적 탐색 후 승/패/세 파싱
                 vs_idx = None
                 for k in range(i+3, min(i+12, len(lines))):
                     if lines[k].upper() == 'VS':
@@ -448,17 +649,15 @@ def get_pitcher_from_gamecenter(today, game_id):
                         raw = lines[k]
                         if not raw or raw[0] not in ('승','패','세','홀'):
                             break
-                        prefix = raw[0]
-                        name   = raw[1:].strip()
-                        label  = {'승':'승','패':'패','세':'세','홀':'홀'}.get(prefix, prefix)
+                        label = raw[0]
+                        name  = raw[1:].strip()
                         away_pitchers.append({'label': label, 'name': name})
                     for k in range(vs_idx+2, min(vs_idx+6, len(lines))):
                         raw = lines[k]
                         if not raw or raw[0] not in ('승','패','세','홀'):
                             break
-                        prefix = raw[0]
-                        name   = raw[1:].strip()
-                        label  = {'승':'승','패':'패','세':'세','홀':'홀'}.get(prefix, prefix)
+                        label = raw[0]
+                        name  = raw[1:].strip()
                         home_pitchers.append({'label': label, 'name': name})
 
                 result = {
@@ -501,24 +700,20 @@ def get_pitcher_from_gamecenter(today, game_id):
     return None
 
 
-def get_team_ranking():
+def get_team_ranking(force=False):
+    """팀 순위 (싱글톤 드라이버 + 조건부 대기)"""
     global _ranking_cache, _ranking_cache_time
     now = time_module.time()
-    if _ranking_cache and now - _ranking_cache_time < 600:
-        print("[순위] 캐시 반환")
+    if not force and _ranking_cache and now - _ranking_cache_time < _TTL_RANKING:
         return _ranking_cache
 
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
-
     try:
-        driver = _get_selenium_driver()
-        driver.get('https://m.koreabaseball.com/Kbo/TeamRank.aspx')
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-        time_module.sleep(2)
-        body = driver.find_element(By.TAG_NAME, 'body').text
-        driver.quit()
+        body = _fetch_body_text(
+            'https://m.koreabaseball.com/Kbo/TeamRank.aspx',
+            wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
+        )
+        if body is None:
+            return _ranking_cache
 
         lines = [l.strip() for l in body.split('\n') if l.strip()]
         teams_order = []
@@ -558,11 +753,11 @@ def get_team_ranking():
         return _ranking_cache
 
 
-def get_recent_games(team):
+def get_recent_games(team, force=False):
+    """팀 최근 10경기 결과 (전체 조회 후 팀 이름으로 필터링)"""
     global _recent_cache, _recent_cache_time
     now = time_module.time()
-    if team in _recent_cache and now - _recent_cache_time.get(team, 0) < 600:
-        print(f"[최근경기] 캐시 반환: {team}")
+    if not force and team in _recent_cache and now - _recent_cache_time.get(team, 0) < _TTL_RECENT:
         return _recent_cache[team]
 
     try:
@@ -572,13 +767,13 @@ def get_recent_games(team):
         headers = _get_kbo_headers()
         results = []
 
-        # ✅ teamId 없이 전체 조회 후 팀 이름으로 필터링
         for m in [month, f'{int(month)-1:02d}']:
             if int(m) < 1:
                 continue
             data = {
                 'leId': '1', 'srIdList': '0,9',
                 'seasonId': year, 'year': year,
+                # ✅ teamId 제거 - 전체 조회 후 팀 이름으로 필터링
                 'month': m, 'gameMonth': m, 'teamId': ''
             }
             try:
@@ -592,15 +787,12 @@ def get_recent_games(team):
                     cells = [strip_html(c.get('Text', '')) for c in row]
                     cells = [c for c in cells if c]
 
-                    # ✅ 해당 팀이 포함된 경기 셀 찾기 (vs 포함)
                     game_cell = next((c for c in cells
                                      if 'vs' in c.lower() and team in c
                                      and re.search(r'\d', c)), None)
                     if not game_cell:
                         continue
 
-                    # ✅ 점수 파싱으로 승/패/무 판단
-                    # 예: 'KIA2vs7LG', 'LG7vs5두산'
                     m2 = re.search(r'(.+?)(\d+)vs(\d+)(.+)', game_cell)
                     if not m2:
                         continue
@@ -608,7 +800,6 @@ def get_recent_games(team):
                     team1  = m2.group(1).strip()
                     score1 = int(m2.group(2))
                     score2 = int(m2.group(3))
-                    team2  = m2.group(4).strip()
 
                     if team in team1:
                         result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
@@ -619,9 +810,7 @@ def get_recent_games(team):
             except Exception as e:
                 print(f"[최근경기 월별 오류] {e}")
 
-        # ✅ 최근 10경기 (오래된→최근 순)
         recent = results[-10:] if len(results) >= 10 else results
-        print(f"[최근경기] {team}: {recent}")
 
         _recent_cache[team] = recent
         _recent_cache_time[team] = time_module.time()
@@ -629,11 +818,116 @@ def get_recent_games(team):
 
     except Exception as e:
         print(f"[최근경기 오류] {e}")
-        return []
+        return _recent_cache.get(team, [])
 
 
 # ─────────────────────────────────────────
-# Flask 라우트
+# 백그라운드 프리워밍 (위젯 자동갱신 체감 속도의 핵심)
+# ─────────────────────────────────────────
+
+def _warm_caches_once():
+    try:
+        today = get_game_date()
+        _get_gamecenter_snapshot(today, force=True)
+        get_live_scores(force=True)
+
+        try:
+            game_ids = get_game_id(today)
+        except Exception as e:
+            print(f"[prewarm game_id 오류] {e}")
+            game_ids = {}
+
+        seen = set()
+        for gid in game_ids.values():
+            if gid in seen:
+                continue
+            seen.add(gid)
+            try:
+                get_pitcher_from_gamecenter(today, gid, force=True)
+            except Exception as e:
+                print(f"[prewarm gameinfo 오류] {e}")
+
+        try:
+            get_team_ranking(force=True)
+        except Exception as e:
+            print(f"[prewarm ranking 오류] {e}")
+
+        for team in KBO_TEAMS:
+            try:
+                get_recent_games(team, force=True)
+            except Exception as e:
+                print(f"[prewarm recent {team} 오류] {e}")
+    except Exception as e:
+        print(f"[prewarm 사이클 오류] {e}")
+
+
+def _bg_refresh_loop():
+    time_module.sleep(2)  # 서버 기동 직후 혼잡 방지
+    while True:
+        interval = 300  # 기본: 5분
+        try:
+            now_kst = datetime.now(KST)
+            hour = now_kst.hour
+            # 경기 시간대: KST 14시~다음날 2시
+            in_game_hours = (14 <= hour <= 23) or (hour < 2)
+            interval = 45 if in_game_hours else 300
+            _warm_caches_once()
+        except Exception as e:
+            print(f"[prewarm loop 오류] {e}")
+            interval = 60
+        time_module.sleep(interval + random.uniform(0, 5))
+
+
+def _start_background():
+    global _bg_started
+    if os.environ.get('WBB_DISABLE_PREWARM') == '1':
+        return
+    with _bg_started_lock:
+        if _bg_started:
+            return
+        _bg_started = True
+    t = threading.Thread(target=_bg_refresh_loop, daemon=True, name='wbb-prewarm')
+    t.start()
+    print("[prewarm] background thread started")
+
+
+# ─────────────────────────────────────────
+# Flask 응답 가속 (Gzip + ETag/304)
+# ─────────────────────────────────────────
+
+@app.after_request
+def _optimize_response(response):
+    try:
+        if (response.status_code == 200
+                and response.direct_passthrough is False
+                and response.mimetype
+                and (response.mimetype.startswith('application/json')
+                     or response.mimetype.startswith('text/'))):
+            data = response.get_data()
+            if data:
+                etag = hashlib.md5(data).hexdigest()
+                response.set_etag(etag)
+                if request.if_none_match and etag in request.if_none_match:
+                    response.status_code = 304
+                    response.set_data(b'')
+                    return response
+
+                accept = request.headers.get('Accept-Encoding', '')
+                if ('gzip' in accept
+                        and len(data) > 200
+                        and 'Content-Encoding' not in response.headers):
+                    gzipped = gzip.compress(data)
+                    response.set_data(gzipped)
+                    response.headers['Content-Encoding'] = 'gzip'
+                    response.headers['Content-Length'] = str(len(gzipped))
+                    response.headers.add('Vary', 'Accept-Encoding')
+    except Exception as e:
+        print(f"[after_request 오류] {e}")
+    return response
+
+
+# ─────────────────────────────────────────
+# Flask 라우트 (경로/응답 스키마 모두 기존 그대로)
 # ─────────────────────────────────────────
 
 @app.route('/')
@@ -722,7 +1016,7 @@ def live_scores():
     scores = get_live_scores()
     if team:
         scores = [s for s in scores if team in s['away'] or team in s['home']]
-    return jsonify({'scores': scores, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
+    return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
 
 
 @app.route('/api/gameinfo')
@@ -745,12 +1039,13 @@ def game_info():
     home_name = CODE_TEAM.get(home_code, home_code)
 
     gc = get_pitcher_from_gamecenter(today, game_id)
+    updated_ts = _gameinfo_cache_time.get(game_id, 0)
     if not gc:
         return jsonify({
             'game_id': game_id, 'away': away_name, 'home': home_name,
             'status': 'unknown',
             'away_pitchers': [], 'home_pitchers': [],
-            'updated': datetime.now(KST).strftime('%H:%M:%S')
+            'updated': _fmt_ts(updated_ts)
         })
 
     return jsonify({
@@ -758,14 +1053,14 @@ def game_info():
         'status': gc['status'],
         'away_pitchers': gc.get('away_pitchers', []),
         'home_pitchers': gc.get('home_pitchers', []),
-        'updated': datetime.now(KST).strftime('%H:%M:%S')
+        'updated': _fmt_ts(updated_ts)
     })
 
 
 @app.route('/api/ranking')
 def team_ranking():
     ranking = get_team_ranking()
-    return jsonify({'ranking': ranking, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
+    return jsonify({'ranking': ranking, 'updated': _fmt_ts(_ranking_cache_time)})
 
 
 @app.route('/api/recent')
@@ -774,8 +1069,27 @@ def recent_games():
     if not team:
         return jsonify({'error': '팀명을 입력해주세요'}), 400
     recent = get_recent_games(team)
-    return jsonify({'team': team, 'recent': recent, 'updated': datetime.now(KST).strftime('%H:%M:%S')})
+    return jsonify({
+        'team': team,
+        'recent': recent,
+        'updated': _fmt_ts(_recent_cache_time.get(team, 0))
+    })
+
+
+@app.route('/api/debug/scores')
+def debug_scores():
+    """스코어 디버그용 - 캐시 무시하고 새로 조회"""
+    scores = get_live_scores(force=True)
+    return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
+
+
+# ─────────────────────────────────────────
+# 모듈 로드 시점에 프리워밍 스레드 기동
+# (gunicorn/waitress 환경 포함. dev의 리로더는 use_reloader=False로 회피)
+# ─────────────────────────────────────────
+_start_background()
 
 
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    # debug=True의 리로더는 모듈을 2번 import해 스케줄러가 중복 기동되므로 비활성화
+    app.run(port=5000, debug=True, use_reloader=False)
