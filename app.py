@@ -979,7 +979,22 @@ def today_schedule():
     games     = get_kbo_schedule(today_str)
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
-    return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
+
+    # ✅ 오늘 경기 없으면 내일 경기 조회
+    is_tomorrow = False
+    if not games:
+        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
+        games = get_kbo_schedule(tomorrow_str)
+        if team:
+            games = [g for g in games if team in g['away'] or team in g['home']]
+        is_tomorrow = True
+
+    return jsonify({
+        '날짜': today.strftime('%Y-%m-%d'),
+        '경기목록': games,
+        '경기수': len(games),
+        '내일경기': is_tomorrow  # ✅ 앱에서 구분용
+    })
 
 
 @app.route('/api/schedule/<date>')
