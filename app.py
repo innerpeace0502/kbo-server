@@ -1078,9 +1078,38 @@ def recent_games():
 
 @app.route('/api/debug/scores')
 def debug_scores():
-    """스코어 디버그용 - 캐시 무시하고 새로 조회"""
+    """스코어 디버그용 - gc_snapshot 포함 모든 캐시 초기화 후 새로 조회"""
+    global _scores_cache, _scores_cache_time
+    # ✅ gc_snapshot 캐시도 함께 초기화
+    with _gc_snapshot_lock:
+        _gc_snapshot.clear()
+        _gc_snapshot_time.clear()
+    _scores_cache      = []
+    _scores_cache_time = 0
     scores = get_live_scores(force=True)
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
+
+@app.route('/api/debug/gamecenter')
+def debug_gamecenter():
+    """Railway에서 게임센터 페이지를 제대로 읽는지 확인"""
+    global _gc_snapshot, _gc_snapshot_time
+    today = get_game_date()
+    # gc_snapshot 초기화 후 새로 읽기
+    with _gc_snapshot_lock:
+        _gc_snapshot.clear()
+        _gc_snapshot_time.clear()
+    try:
+        snap = _get_gamecenter_snapshot(today, force=True)
+        if not snap:
+            return jsonify({'error': 'snap is None', 'today': today})
+        return jsonify({
+            'today': today,
+            'line_count': len(snap['lines']),
+            'lines': snap['lines'],
+            'stadium_map': {k: list(v) for k, v in snap['stadium_map'].items()}
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'today': today})
 
 
 # ─────────────────────────────────────────

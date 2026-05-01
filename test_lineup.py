@@ -1,67 +1,72 @@
 # test_lineup.py
 # -*- coding: utf-8 -*-
-import requests, re
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+import time, re, requests
 from datetime import datetime, timezone, timedelta
 
 KST = timezone(timedelta(hours=9))
-today = datetime.now(KST).strftime('%Y%m%d')
-year  = today[:4]
-month = today[4:6]
+now = datetime.now(KST)
+today = (now - timedelta(days=1)).strftime('%Y%m%d') if now.hour < 4 else now.strftime('%Y%m%d')
+print(f'조회 날짜: {today}')
 
-headers = {
-    'User-Agent': 'Mozilla/5.0',
-    'Referer': 'https://www.koreabaseball.com/',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Content-Type': 'application/x-www-form-urlencoded'
-}
+STADIUMS = ['잠실','문학','광주','고척','대전','수원','사직','창원','대구','인천','청주']
 
-team = 'KIA'
-results = []
+options = Options()
+options.add_argument('--headless')
+options.add_argument('--no-sandbox')
+options.add_argument('--disable-dev-shm-usage')
+options.add_argument('--disable-gpu')
 
-for m in [month, f'{int(month)-1:02d}']:
-    if int(m) < 1:
-        continue
-    data = {
-        'leId': '1', 'srIdList': '0,9',
-        'seasonId': year, 'year': year,
-        'month': m, 'gameMonth': m, 'teamId': ''
-    }
-    res = requests.post(
-        'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
-        headers=headers, data=data, timeout=10
-    )
-    rows = res.json().get('rows', [])
-    print(f'{m}월: {len(rows)}개 row')
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+try:
+    url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+    driver.get(url)
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
+    time.sleep(3)
+    body = driver.find_element(By.TAG_NAME, 'body').text
+    lines = [l.strip() for l in body.split('\n') if l.strip()]
+    print(f'전체 라인 수: {len(lines)}')
 
-    for row_obj in rows:
-        row = row_obj.get('row', [])
-        cells = [re.sub(r'<[^>]+>', '', c.get('Text', '')).strip() for c in row]
-        cells = [c for c in cells if c]
+    # 광주 경기만 집중 출력
+    for i, line in enumerate(lines):
+        if '광주' in line:
+            print(f'\n=== 광주 발견 i={i} ===')
+            for j in range(i, min(i+15, len(lines))):
+                print(f'  [{j}] (i+{j-i}): {lines[j]}')
+            break
 
-        game_cell = next((c for c in cells
-                         if 'vs' in c.lower() and team in c
-                         and re.search(r'\d', c)), None)
-        if not game_cell:
-            continue
+    # 전체 라인 출력
+    print('\n=== 전체 라인 ===')
+    for i, line in enumerate(lines):
+        print(f'{i:3d}: {line}')
 
-        m2 = re.search(r'(.+?)(\d+)vs(\d+)(.+)', game_cell)
-        if not m2:
-            # ✅ 점수 없는 경기 (무승부 0vs0 포함) 확인
-            print(f'  점수없음: {game_cell} | 전체셀: {cells}')
-            continue
-
-        team1  = m2.group(1).strip()
-        score1 = int(m2.group(2))
-        score2 = int(m2.group(3))
-        team2  = m2.group(4).strip()
-
-        if team in team1:
-            result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
-        else:
-            result = '승' if score2 > score1 else ('패' if score2 < score1 else '무')
-        results.append(result)
-        print(f'  {game_cell} → {result}')
-
-print(f'\nKIA 전체 결과: {results}')
-print(f'최근 10경기: {results[-10:]}')
-print(f'승:{results.count("승")} 패:{results.count("패")} 무:{results.count("무")}')
+    # 스코어 파싱 직접 시뮬레이션
+    print('\n=== 스코어 파싱 시뮬레이션 ===')
+    stadium_map = {'잠실':('NC','LG'),'문학':('롯데','SSG'),'대구':('한화','삼성'),'광주':('KT','KIA'),'고척':('두산','키움')}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
+        if not (stadium_match and re.search(r'\d{2}:\d{2}', line)):
+            i += 1; continue
+        teams = stadium_map.get(stadium_match)
+        status_line = lines[i+2] if i+2 < len(lines) else ''
+        print(f'[i={i}] {stadium_match} teams={teams} status={status_line}')
+        if '경기종료' in status_line:
+            vs_idx = None
+            for k in range(i+3, min(i+12, len(lines))):
+                if lines[k].strip().upper() == 'VS':
+                    vs_idx = k; break
+            if vs_idx:
+                away_score = lines[i+3]
+                home_score = lines[vs_idx+1] if vs_idx+1 < len(lines) else ''
+                print(f'  → away_score={away_score} home_score={home_score} isdigit={away_score.isdigit()}/{home_score.isdigit()}')
+        i += 1
+finally:
+    driver.quit()
