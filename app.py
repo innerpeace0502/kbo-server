@@ -74,14 +74,14 @@ channel_map = {
         "sbs":          "5",
     },
     "Uplus": {
-        "spotv": "107", "spotv2": "108", "kbs_n_sports": "133",
-        "mbc_sports": "130", "sbs_sports": "131",
-        "kbs2": "7", "mbc": "11", "sbs": "13",
+        "spotv": "107", "spotv2": "108", "kbs_n_sports": "105",
+        "mbc_sports": "106", "sbs_sports": "104",
+        "kbs2": "7", "mbc": "11", "sbs": "5",
     },
     "btv": {
         "spotv": "986", "spotv2": "982", "kbs_n_sports": "977",
         "mbc_sports": "978", "sbs_sports": "979",
-        "kbs2": "7", "mbc": "11", "sbs": "13",
+        "kbs2": "7", "mbc": "11", "sbs": "5",
     }
 }
 
@@ -754,7 +754,7 @@ def get_team_ranking(force=False):
 
 
 def get_recent_games(team, force=False):
-    """팀 최근 10경기 결과 (전체 조회 후 팀 이름으로 필터링)"""
+    """팀 최근 10경기 결과 (teamId로 서버 사이드 필터)"""
     global _recent_cache, _recent_cache_time
     now = time_module.time()
     if not force and team in _recent_cache and now - _recent_cache_time.get(team, 0) < _TTL_RECENT:
@@ -773,7 +773,7 @@ def get_recent_games(team, force=False):
             data = {
                 'leId': '1', 'srIdList': '0,9',
                 'seasonId': year, 'year': year,
-                # ✅ teamId 제거 - 전체 조회 후 팀 이름으로 필터링
+                # teamId 제거 - KBO API가 teamId 필터 시 rows:0 반환
                 'month': m, 'gameMonth': m, 'teamId': ''
             }
             try:
@@ -979,22 +979,7 @@ def today_schedule():
     games     = get_kbo_schedule(today_str)
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
-
-    # ✅ 오늘 경기 없으면 내일 경기 조회
-    is_tomorrow = False
-    if not games:
-        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
-        games = get_kbo_schedule(tomorrow_str)
-        if team:
-            games = [g for g in games if team in g['away'] or team in g['home']]
-        is_tomorrow = True
-
-    return jsonify({
-        '날짜': today.strftime('%Y-%m-%d'),
-        '경기목록': games,
-        '경기수': len(games),
-        '내일경기': is_tomorrow  # ✅ 앱에서 구분용
-    })
+    return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
 
 
 @app.route('/api/schedule/<date>')
@@ -1104,19 +1089,6 @@ def debug_scores():
 # ─────────────────────────────────────────
 _start_background()
 
-@app.route('/api/debug/gamecenter')
-def debug_gamecenter():
-    """Railway에서 게임센터 페이지를 제대로 읽는지 확인"""
-    today = get_game_date()
-    try:
-        lines = _get_gamecenter_lines(today)
-        return jsonify({
-            'today': today,
-            'line_count': len(lines),
-            'lines': lines[:30]  # 처음 30줄만
-        })
-    except Exception as e:
-        return jsonify({'error': str(e), 'today': today})
 
 if __name__ == '__main__':
     # debug=True의 리로더는 모듈을 2번 import해 스케줄러가 중복 기동되므로 비활성화

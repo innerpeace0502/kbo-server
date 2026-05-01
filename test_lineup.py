@@ -1,116 +1,67 @@
 # test_lineup.py
 # -*- coding: utf-8 -*-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-import time, re, requests
+import requests, re
+from datetime import datetime, timezone, timedelta
 
-options = Options()
-options.add_argument('--headless')
-options.add_argument('--no-sandbox')
-options.add_argument('--disable-dev-shm-usage')
-options.add_argument('--disable-gpu')
+KST = timezone(timedelta(hours=9))
+today = datetime.now(KST).strftime('%Y%m%d')
+year  = today[:4]
+month = today[4:6]
 
-STADIUMS = ['잠실','문학','광주','고척','대전','수원','사직','창원','대구','인천','청주']
-KBO_TEAMS = ["LG","KT","SSG","NC","두산","KIA","롯데","삼성","한화","키움"]
+headers = {
+    'User-Agent': 'Mozilla/5.0',
+    'Referer': 'https://www.koreabaseball.com/',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
 
-def get_stadium_map(today):
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Referer': 'https://www.koreabaseball.com/',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Content-Type': 'application/x-www-form-urlencoded'
+team = 'KIA'
+results = []
+
+for m in [month, f'{int(month)-1:02d}']:
+    if int(m) < 1:
+        continue
+    data = {
+        'leId': '1', 'srIdList': '0,9',
+        'seasonId': year, 'year': year,
+        'month': m, 'gameMonth': m, 'teamId': ''
     }
-    year = today[:4]; month = today[4:6]
-    data = {'leId':'1','srIdList':'0,9','seasonId':year,'year':year,
-            'month':month,'gameMonth':month,'teamId':''}
-    res = requests.post('https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
-                       headers=headers, data=data, timeout=10)
-    result = res.json()
-    target_date = f"{month}.{today[6:8]}"
-    current_date = ''
-    stadium_map = {}
-    STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주']
-    for row_obj in result.get('rows', []):
+    res = requests.post(
+        'https://www.koreabaseball.com/ws/Schedule.asmx/GetScheduleList',
+        headers=headers, data=data, timeout=10
+    )
+    rows = res.json().get('rows', [])
+    print(f'{m}월: {len(rows)}개 row')
+
+    for row_obj in rows:
         row = row_obj.get('row', [])
-        for cell in row:
-            if cell.get('Class') == 'day':
-                txt = re.sub(r'<[^>]+>','',cell.get('Text','')).strip()[:5]
-                if txt: current_date = txt
-        if target_date not in current_date: continue
-        play_cell = next((c for c in row if c.get('Class') == 'play'), None)
-        if not play_cell: continue
-        play_text = play_cell.get('Text','')
-        teams = re.findall(r'<span(?:[^>]*)>(.*?)</span>', play_text)
-        teams = [t for t in teams if t and 'vs' not in t.lower()]
-        away = next((t for t in KBO_TEAMS if t in teams[0]), None) if teams else None
-        home = next((t for t in KBO_TEAMS if t in teams[-1]), None) if len(teams)>1 else None
-        if not away or not home: continue
-        for cell in row:
-            cell_text = re.sub(r'<[^>]+>','',cell.get('Text','')).strip()
-            for s in STAD_LIST:
-                if s in cell_text:
-                    stadium_map[s] = (away, home)
-                    break
-        play_clean = re.sub(r'<[^>]+>','',play_text)
-        for s in STAD_LIST:
-            if s in play_clean and s not in stadium_map:
-                stadium_map[s] = (away, home)
-    return stadium_map
+        cells = [re.sub(r'<[^>]+>', '', c.get('Text', '')).strip() for c in row]
+        cells = [c for c in cells if c]
 
-today = '20260426'
-stadium_map = get_stadium_map(today)
-print(f'구장맵: {stadium_map}')
+        game_cell = next((c for c in cells
+                         if 'vs' in c.lower() and team in c
+                         and re.search(r'\d', c)), None)
+        if not game_cell:
+            continue
 
-driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-scores = []
-try:
-    url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-    driver.get(url)
-    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, 'body')))
-    time.sleep(3)
-    body = driver.find_element(By.TAG_NAME, 'body').text
-    lines = [l.strip() for l in body.split('\n') if l.strip()]
+        m2 = re.search(r'(.+?)(\d+)vs(\d+)(.+)', game_cell)
+        if not m2:
+            # ✅ 점수 없는 경기 (무승부 0vs0 포함) 확인
+            print(f'  점수없음: {game_cell} | 전체셀: {cells}')
+            continue
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stadium_match = next((s for s in STADIUMS if line.startswith(s)), None)
-        if not (stadium_match and re.search(r'\d{2}:\d{2}', line)):
-            i += 1; continue
+        team1  = m2.group(1).strip()
+        score1 = int(m2.group(2))
+        score2 = int(m2.group(3))
+        team2  = m2.group(4).strip()
 
-        teams = stadium_map.get(stadium_match)
-        print(f'\n[i={i}] 구장={stadium_match} teams={teams}')
+        if team in team1:
+            result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
+        else:
+            result = '승' if score2 > score1 else ('패' if score2 < score1 else '무')
+        results.append(result)
+        print(f'  {game_cell} → {result}')
 
-        if i+2 >= len(lines):
-            i += 1; continue
-
-        status_line = lines[i+2]
-        print(f'  status={status_line}')
-
-        if '경기종료' in status_line:
-            vs_idx = None
-            for k in range(i+3, min(i+12, len(lines))):
-                print(f'    lines[{k}]={lines[k]}')
-                if lines[k].strip().upper() == 'VS':
-                    vs_idx = k; break
-            print(f'  vs_idx={vs_idx}')
-            if vs_idx:
-                away_score = lines[i+3]
-                home_score = lines[vs_idx+1] if vs_idx+1 < len(lines) else ''
-                print(f'  away_score={away_score} home_score={home_score}')
-                print(f'  isdigit: away={away_score.isdigit()} home={home_score.isdigit()}')
-                if away_score.isdigit() and home_score.isdigit() and teams:
-                    scores.append({'away':teams[0],'home':teams[1],
-                                   'away_score':away_score,'home_score':home_score,'status':'2'})
-                    print(f'  ✅ 추가됨!')
-        i += 1
-
-finally:
-    driver.quit()
-
-print(f'\n최종 스코어: {scores}')
+print(f'\nKIA 전체 결과: {results}')
+print(f'최근 10경기: {results[-10:]}')
+print(f'승:{results.count("승")} 패:{results.count("패")} 무:{results.count("무")}')
