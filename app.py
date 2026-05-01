@@ -520,7 +520,11 @@ def get_live_scores(force=False):
                                 'away_score': away_score, 'home_score': home_score,
                                 'status': '2', 'inning': '경기종료'
                             })
-                    i += 10
+                    # ✅ i += 10 제거하고 vs_idx 기준으로 점프
+                    if vs_idx:
+                        i = vs_idx + 2  # VS 다음부터 재탐색
+                    else:
+                        i += 10
                     continue
 
                 elif re.match(r'\d+회[초말]', status_line):
