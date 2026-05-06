@@ -771,7 +771,7 @@ def get_recent_games(team, force=False):
         headers = _get_kbo_headers()
         results = []
 
-        for m in [month, f'{int(month)-1:02d}']:
+        for m in [f'{int(month)-1:02d}', month]:
             if int(m) < 1:
                 continue
             data = {
