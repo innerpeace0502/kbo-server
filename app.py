@@ -1122,6 +1122,24 @@ def debug_gamecenter():
 # ─────────────────────────────────────────
 _start_background()
 
+@app.route('/api/debug/recent')
+def debug_recent():
+    """recent 캐시 초기화 후 새로 조회"""
+    global _recent_cache, _recent_cache_time
+    team = request.args.get('team', 'KIA')
+    # 해당 팀 캐시만 초기화
+    _recent_cache.pop(team, None)
+    _recent_cache_time.pop(team, None)
+    recent = get_recent_games(team)
+    return jsonify({
+        'team': team,
+        'recent': recent,
+        'count': len(recent),
+        'win': recent.count('승'),
+        'lose': recent.count('패'),
+        'draw': recent.count('무'),
+        'updated': _fmt_ts(_recent_cache_time.get(team, 0))
+    })
 
 if __name__ == '__main__':
     # debug=True의 리로더는 모듈을 2번 import해 스케줄러가 중복 기동되므로 비활성화
