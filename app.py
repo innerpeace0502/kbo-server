@@ -1157,6 +1157,11 @@ def debug_recent():
         'updated': _fmt_ts(_recent_cache_time.get(team, 0))
     })
 
+@app.route('/webapp')
+def webapp():
+    """웹앱 서빙"""
+    return send_from_directory('static', 'index.html')
+
 if __name__ == '__main__':
     # debug=True의 리로더는 모듈을 2번 import해 스케줄러가 중복 기동되므로 비활성화
     app.run(port=5000, debug=True, use_reloader=False)
