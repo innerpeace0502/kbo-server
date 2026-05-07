@@ -110,6 +110,7 @@ body {
 .badge-ended { background: #1A1A1A; border: 1px solid #2A2A2A; color: #999; }
 .badge-live   { background: #261010; border: 1px solid #4D1515; color: #FF6B6B; }
 .badge-pre    { background: #1A1800; border: 1px solid #3A3000; color: #FFD700; }
+.badge-cancelled { background: #1A0A2A; border: 1px solid #4A2060; color: #B388FF; }
 
 /* ── 메인 경기 카드 ── */
 .game-card {
@@ -370,7 +371,7 @@ body {
       <div class="score-row">
         <!-- 원정팀 -->
         <div class="team-block">
-          <img class="team-logo" id="away-logo" src="" alt=""/>
+          <img class="team-logo" id="away-logo" src="" alt="" onerror="this.style.display='none'"/>
           <div class="team-info">
             <span class="team-name" id="away-name"></span>
             <span class="team-score hidden" id="away-score"></span>
@@ -385,7 +386,7 @@ body {
         </div>
         <!-- 홈팀 -->
         <div class="team-block right">
-          <img class="team-logo" id="home-logo" src="" alt=""/>
+          <img class="team-logo" id="home-logo" src="" alt="" onerror="this.style.display='none'"/>
           <div class="team-info right">
             <span class="team-name" id="home-name"></span>
             <span class="team-score hidden" id="home-score"></span>
@@ -515,12 +516,8 @@ async function loadAll() {
     document.getElementById('stadium').textContent = game.stadium || '';
 
     // 로고
-    const awayLogo = document.getElementById('away-logo');
-    const homeLogo = document.getElementById('home-logo');
-    awayLogo.style.display = '';
-    homeLogo.style.display = '';
-    awayLogo.src = `${BASE}/logos/${game.away}`;
-    homeLogo.src = `${BASE}/logos/${game.home}`;
+    document.getElementById('away-logo').src = `${BASE}/logos/${game.away}`;
+    document.getElementById('home-logo').src = `${BASE}/logos/${game.home}`;
 
     // 채널
     await loadChannel(game.broadcast);
@@ -531,6 +528,11 @@ async function loadAll() {
     // 경기예정 초기 상태 (VS)
     if (isTomorrow) {
       setPreState(game.time);
+    }
+
+    // ✅ 우천취소 처리
+    if (game.cancelled) {
+      setCancelledState();
     }
 
     // 병렬 로드
@@ -626,6 +628,19 @@ function setPreState(time) {
   const statusBadge = document.getElementById('game-status-badge');
   statusBadge.textContent = '경기 예정';
   statusBadge.className = 'status-badge badge-pre';
+}
+
+// ✅ 우천취소 상태 표시
+function setCancelledState() {
+  const badge = document.getElementById('center-badge');
+  badge.textContent = '우천취소';
+  badge.className = 'inning-badge badge-cancelled';
+  badge.style.display = 'block';
+  const gameTime = document.getElementById('game-time');
+  if (gameTime) gameTime.style.display = 'none';
+  const statusBadge = document.getElementById('game-status-badge');
+  statusBadge.textContent = '우천취소';
+  statusBadge.className = 'status-badge badge-cancelled';
 }
 
 // ── 투수/타자 ──

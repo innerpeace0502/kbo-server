@@ -74,14 +74,14 @@ channel_map = {
         "sbs":          "5",
     },
     "Uplus": {
-        "spotv": "107", "spotv2": "108", "kbs_n_sports": "105",
-        "mbc_sports": "106", "sbs_sports": "104",
-        "kbs2": "7", "mbc": "11", "sbs": "5",
+        "spotv": "107", "spotv2": "108", "kbs_n_sports": "133",
+        "mbc_sports": "130", "sbs_sports": "131",
+        "kbs2": "7", "mbc": "11", "sbs": "13",
     },
     "btv": {
         "spotv": "986", "spotv2": "982", "kbs_n_sports": "977",
         "mbc_sports": "978", "sbs_sports": "979",
-        "kbs2": "7", "mbc": "11", "sbs": "5",
+        "kbs2": "7", "mbc": "11", "sbs": "13",
     }
 }
 
@@ -359,13 +359,27 @@ def get_kbo_schedule(date_str):
                 if broadcast:
                     break
             stadium_text = next((c for c in cells if any(s in c for s in STAD_LIST)), '')
+            # ✅ 우천취소 여부 확인
+            is_cancelled = any('우천' in c or '취소' in c for c in cells)
             if away_text and home_text:
                 games.append({
                     'time': time_text, 'away': away_text, 'home': home_text,
                     'stadium': stadium_text, 'broadcast': broadcast,
                     'away_logo': get_logo_url(away_text),
-                    'home_logo': get_logo_url(home_text)
+                    'home_logo': get_logo_url(home_text),
+                    'cancelled': is_cancelled
                 })
+            elif is_cancelled:
+                # ✅ 점수 없는 우천취소 경기도 포함 (팀명만 있는 경우)
+                teams_in_cells = [t for t in KBO_TEAMS if any(t in c for c in cells)]
+                if len(teams_in_cells) >= 2:
+                    games.append({
+                        'time': time_text, 'away': teams_in_cells[0], 'home': teams_in_cells[1],
+                        'stadium': stadium_text, 'broadcast': '',
+                        'away_logo': get_logo_url(teams_in_cells[0]),
+                        'home_logo': get_logo_url(teams_in_cells[1]),
+                        'cancelled': True
+                    })
         return games
     except Exception as e:
         print(f"[스케줄 오류] {e}")
@@ -520,11 +534,7 @@ def get_live_scores(force=False):
                                 'away_score': away_score, 'home_score': home_score,
                                 'status': '2', 'inning': '경기종료'
                             })
-                    # ✅ i += 10 제거하고 vs_idx 기준으로 점프
-                    if vs_idx:
-                        i = vs_idx + 2  # VS 다음부터 재탐색
-                    else:
-                        i += 10
+                    i += 10
                     continue
 
                 elif re.match(r'\d+회[초말]', status_line):
@@ -771,14 +781,16 @@ def get_recent_games(team, force=False):
         headers = _get_kbo_headers()
         results = []
 
-        for m in [f'{int(month)-1:02d}', month]:
+        # ✅ teamId로 필터해 요청량 감소
+        team_id = TEAM_CODE.get(team, '')
+
+        for m in [month, f'{int(month)-1:02d}']:
             if int(m) < 1:
                 continue
             data = {
                 'leId': '1', 'srIdList': '0,9',
                 'seasonId': year, 'year': year,
-                # teamId 제거 - KBO API가 teamId 필터 시 rows:0 반환
-                'month': m, 'gameMonth': m, 'teamId': ''
+                'month': m, 'gameMonth': m, 'teamId': team_id
             }
             try:
                 res = requests.post(
@@ -983,23 +995,7 @@ def today_schedule():
     games     = get_kbo_schedule(today_str)
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
-
-    # ✅ 오늘 경기 없으면 내일 경기 조회
-    is_tomorrow = False
-    if not games:
-        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
-        games = get_kbo_schedule(tomorrow_str)
-        if team:
-            games = [g for g in games if team in g['away'] or team in g['home']]
-        if games:
-            is_tomorrow = True
-
-    return jsonify({
-        '날짜': today.strftime('%Y-%m-%d'),
-        '경기목록': games,
-        '경기수': len(games),
-        '내일경기': is_tomorrow   # ✅ 앱/웹에서 "내일 경기 예정" 표시용
-    })
+    return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
 
 
 @app.route('/api/schedule/<date>')
@@ -1098,38 +1094,9 @@ def recent_games():
 
 @app.route('/api/debug/scores')
 def debug_scores():
-    """스코어 디버그용 - gc_snapshot 포함 모든 캐시 초기화 후 새로 조회"""
-    global _scores_cache, _scores_cache_time
-    # ✅ gc_snapshot 캐시도 함께 초기화
-    with _gc_snapshot_lock:
-        _gc_snapshot.clear()
-        _gc_snapshot_time.clear()
-    _scores_cache      = []
-    _scores_cache_time = 0
+    """스코어 디버그용 - 캐시 무시하고 새로 조회"""
     scores = get_live_scores(force=True)
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
-
-@app.route('/api/debug/gamecenter')
-def debug_gamecenter():
-    """Railway에서 게임센터 페이지를 제대로 읽는지 확인"""
-    global _gc_snapshot, _gc_snapshot_time
-    today = get_game_date()
-    # gc_snapshot 초기화 후 새로 읽기
-    with _gc_snapshot_lock:
-        _gc_snapshot.clear()
-        _gc_snapshot_time.clear()
-    try:
-        snap = _get_gamecenter_snapshot(today, force=True)
-        if not snap:
-            return jsonify({'error': 'snap is None', 'today': today})
-        return jsonify({
-            'today': today,
-            'line_count': len(snap['lines']),
-            'lines': snap['lines'],
-            'stadium_map': {k: list(v) for k, v in snap['stadium_map'].items()}
-        })
-    except Exception as e:
-        return jsonify({'error': str(e), 'today': today})
 
 
 # ─────────────────────────────────────────
@@ -1138,29 +1105,6 @@ def debug_gamecenter():
 # ─────────────────────────────────────────
 _start_background()
 
-@app.route('/api/debug/recent')
-def debug_recent():
-    """recent 캐시 초기화 후 새로 조회"""
-    global _recent_cache, _recent_cache_time
-    team = request.args.get('team', 'KIA')
-    # 해당 팀 캐시만 초기화
-    _recent_cache.pop(team, None)
-    _recent_cache_time.pop(team, None)
-    recent = get_recent_games(team)
-    return jsonify({
-        'team': team,
-        'recent': recent,
-        'count': len(recent),
-        'win': recent.count('승'),
-        'lose': recent.count('패'),
-        'draw': recent.count('무'),
-        'updated': _fmt_ts(_recent_cache_time.get(team, 0))
-    })
-
-@app.route('/webapp')
-def webapp():
-    """웹앱 서빙"""
-    return send_from_directory('static', 'index.html')
 
 if __name__ == '__main__':
     # debug=True의 리로더는 모듈을 2번 import해 스케줄러가 중복 기동되므로 비활성화
