@@ -950,6 +950,9 @@ def _optimize_response(response):
 def home():
     return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now(KST).strftime('%Y-%m-%d %H:%M')})
 
+@app.route('/webapp')
+def webapp():
+    return send_from_directory('.', 'index_webapp.html')
 
 @app.route('/logos/<team>')
 def get_logo(team):
