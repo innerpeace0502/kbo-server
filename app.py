@@ -935,16 +935,30 @@ def home():
     return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now(KST).strftime('%Y-%m-%d %H:%M')})
 
 
+@app.route('/webapp')
+def webapp():
+    from flask import Response
+    import os
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index_webapp.html'),
+        '/app/index_webapp.html',
+        os.path.join(os.getcwd(), 'index_webapp.html'),
+        'index_webapp.html',
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return Response(f.read(), mimetype='text/html')
+    return Response('index_webapp.html not found', status=404)
+
+
 @app.route('/logos/<team>')
 def get_logo(team):
-    from flask import make_response
     filename = LOGO_FILES.get(team)
     if filename:
         png_path = os.path.join('static', 'logos', filename)
         if os.path.exists(png_path):
-            resp = make_response(send_from_directory('static/logos', filename))
-            resp.headers['Cache-Control'] = 'no-store'
-            return resp
+            return send_from_directory('static/logos', filename)
 
     from PIL import Image, ImageDraw, ImageFont
     import io
@@ -971,6 +985,7 @@ def get_logo(team):
     img_data = io.BytesIO()
     img.save(img_data, format='PNG')
     img_data.seek(0)
+    from flask import make_response
     resp = make_response(send_file(img_data, mimetype='image/png'))
     resp.headers['Cache-Control'] = 'no-store'
     return resp
