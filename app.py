@@ -813,10 +813,6 @@ def get_recent_games(team, force=False):
                     if not any(t in m2.group(4) for t in KBO_TEAMS):
                         continue
 
-                    # 동점은 시리즈 전적 오파싱 가능성 높으므로 제외 (KBO 무승부는 극히 드뭄)
-                    if score1 == score2:
-                        continue
-
                     if team in team1:
                         result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
                     else:
