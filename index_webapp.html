@@ -370,7 +370,7 @@ body {
       <div class="score-row">
         <!-- 원정팀 -->
         <div class="team-block">
-          <img class="team-logo" id="away-logo" src="" alt="" onerror="this.style.visibility='hidden'"/>
+          <img class="team-logo" id="away-logo" alt=""/>
           <div class="team-info">
             <span class="team-name" id="away-name"></span>
             <span class="team-score hidden" id="away-score"></span>
@@ -385,7 +385,7 @@ body {
         </div>
         <!-- 홈팀 -->
         <div class="team-block right">
-          <img class="team-logo" id="home-logo" src="" alt="" onerror="this.style.visibility='hidden'"/>
+          <img class="team-logo" id="home-logo" alt=""/>
           <div class="team-info right">
             <span class="team-name" id="home-name"></span>
             <span class="team-score hidden" id="home-score"></span>
@@ -517,8 +517,12 @@ async function loadAll() {
     document.getElementById('stadium').textContent = game.stadium || '';
 
     // 로고
-    document.getElementById('away-logo').src = `${BASE}/logos/${game.away}`;
-    document.getElementById('home-logo').src = `${BASE}/logos/${game.home}`;
+    const awayLogoEl = document.getElementById('away-logo');
+    const homeLogoEl = document.getElementById('home-logo');
+    awayLogoEl.onerror = function(){ this.style.display='none'; };
+    homeLogoEl.onerror = function(){ this.style.display='none'; };
+    awayLogoEl.src = `${BASE}/logos/${game.away}`;
+    homeLogoEl.src = `${BASE}/logos/${game.home}`;
 
     // 채널
     await loadChannel(game.broadcast);
