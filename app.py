@@ -784,14 +784,20 @@ def get_recent_games(team, force=False):
                 rows = res.json().get('rows', [])
                 for row_obj in rows:
                     row = row_obj.get('row', [])
-                    cells = [strip_html(c.get('Text', '')) for c in row]
-                    cells = [c for c in cells if c]
-
-                    game_cell = next((c for c in cells
-                                     if 'vs' in c.lower() and team in c
-                                     and re.search(r'\d', c)), None)
-                    if not game_cell:
-                        continue
+                    # play 클래스 셀(실제 점수 셀)만 확인
+                    play_cell_obj = next((c for c in row if 'play' in (c.get('Class') or '')), None)
+                    if play_cell_obj:
+                        game_cell = strip_html(play_cell_obj.get('Text', ''))
+                        if not (team in game_cell and re.search(r'\d', game_cell) and 'vs' in game_cell.lower()):
+                            continue
+                    else:
+                        cells = [strip_html(c.get('Text', '')) for c in row]
+                        cells = [c for c in cells if c]
+                        game_cell = next((c for c in cells
+                            if 'vs' in c.lower() and team in c
+                            and re.search(r'\d', c)), None)
+                        if not game_cell:
+                            continue
 
                     m2 = re.search(r'(.+?)(\d+)vs(\d+)(.+)', game_cell)
                     if not m2:
