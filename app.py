@@ -359,27 +359,13 @@ def get_kbo_schedule(date_str):
                 if broadcast:
                     break
             stadium_text = next((c for c in cells if any(s in c for s in STAD_LIST)), '')
-            # ✅ 우천취소 여부 확인
-            is_cancelled = any('우천' in c or '취소' in c for c in cells)
             if away_text and home_text:
                 games.append({
                     'time': time_text, 'away': away_text, 'home': home_text,
                     'stadium': stadium_text, 'broadcast': broadcast,
                     'away_logo': get_logo_url(away_text),
-                    'home_logo': get_logo_url(home_text),
-                    'cancelled': is_cancelled
+                    'home_logo': get_logo_url(home_text)
                 })
-            elif is_cancelled:
-                # ✅ 점수 없는 우천취소 경기도 포함 (팀명만 있는 경우)
-                teams_in_cells = [t for t in KBO_TEAMS if any(t in c for c in cells)]
-                if len(teams_in_cells) >= 2:
-                    games.append({
-                        'time': time_text, 'away': teams_in_cells[0], 'home': teams_in_cells[1],
-                        'stadium': stadium_text, 'broadcast': '',
-                        'away_logo': get_logo_url(teams_in_cells[0]),
-                        'home_logo': get_logo_url(teams_in_cells[1]),
-                        'cancelled': True
-                    })
         return games
     except Exception as e:
         print(f"[스케줄 오류] {e}")
@@ -781,16 +767,14 @@ def get_recent_games(team, force=False):
         headers = _get_kbo_headers()
         results = []
 
-        # ✅ teamId로 필터해 요청량 감소
-        team_id = TEAM_CODE.get(team, '')
-
         for m in [month, f'{int(month)-1:02d}']:
             if int(m) < 1:
                 continue
             data = {
                 'leId': '1', 'srIdList': '0,9',
                 'seasonId': year, 'year': year,
-                'month': m, 'gameMonth': m, 'teamId': team_id
+                # teamId 제거 - KBO API가 teamId 필터 시 rows:0 반환
+                'month': m, 'gameMonth': m, 'teamId': ''
             }
             try:
                 res = requests.post(
@@ -950,9 +934,13 @@ def _optimize_response(response):
 def home():
     return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now(KST).strftime('%Y-%m-%d %H:%M')})
 
+
 @app.route('/webapp')
 def webapp():
-    return send_from_directory('.', 'index_webapp.html')
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return send_from_directory(base_dir, 'index_webapp.html')
+
 
 @app.route('/logos/<team>')
 def get_logo(team):
