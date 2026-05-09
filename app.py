@@ -935,20 +935,16 @@ def home():
     return jsonify({'상태': '서버 정상 작동중!', '시간': datetime.now(KST).strftime('%Y-%m-%d %H:%M')})
 
 
-@app.route('/webapp')
-def webapp():
-    import os
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return send_from_directory(base_dir, 'index_webapp.html')
-
-
 @app.route('/logos/<team>')
 def get_logo(team):
+    from flask import make_response
     filename = LOGO_FILES.get(team)
     if filename:
         png_path = os.path.join('static', 'logos', filename)
         if os.path.exists(png_path):
-            return send_from_directory('static/logos', filename)
+            resp = make_response(send_from_directory('static/logos', filename))
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
 
     from PIL import Image, ImageDraw, ImageFont
     import io
@@ -975,7 +971,9 @@ def get_logo(team):
     img_data = io.BytesIO()
     img.save(img_data, format='PNG')
     img_data.seek(0)
-    return send_file(img_data, mimetype='image/png')
+    resp = make_response(send_file(img_data, mimetype='image/png'))
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 @app.route('/api/schedule/today')

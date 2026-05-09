@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>KBO 위젯</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0F0F1A;
+  color: white;
+  font-family: -apple-system, 'Noto Sans KR', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+}
+
+.container {
+  width: 100%;
+  max-width: 420px;
+  padding-top: 20px;
+}
+
+/* ── 설정 영역 ── */
+.settings-card {
+  background: #1A1A2A;
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.settings-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #FFD700;
+  margin-bottom: 10px;
+}
+.select-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.select-item { flex: 1; }
+.select-label {
+  font-size: 10px;
+  color: #888;
+  margin-bottom: 4px;
+}
+.select-item select {
+  width: 100%;
+  height: 36px;
+  background: #252535;
+  border: 1px solid #333355;
+  border-radius: 8px;
+  color: #FFD700;
+  padding: 0 10px;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23666' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.save-btn {
+  width: 100%;
+  height: 36px;
+  background: #FFD700;
+  color: #0F0F1A;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.save-btn:hover { opacity: 0.9; }
+.save-btn:active { opacity: 0.75; }
+
+/* ── 상태 메시지 ── */
+.status-msg {
+  font-size: 11px;
+  color: #4CD964;
+  min-height: 18px;
+  padding: 4px 2px 6px;
+}
+
+/* ── 구분선 ── */
+.divider {
+  height: 1px;
+  background: #1E1E2E;
+  margin-bottom: 12px;
+}
+
+/* ── 날짜 + 배지 ── */
+.date-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.date-text { font-size: 11px; color: #666; }
+.status-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-weight: 600;
+}
+.badge-ended { background: #1A1A1A; border: 1px solid #2A2A2A; color: #999; }
+.badge-live   { background: #261010; border: 1px solid #4D1515; color: #FF6B6B; }
+.badge-pre    { background: #1A1800; border: 1px solid #3A3000; color: #FFD700; }
+
+/* ── 메인 경기 카드 ── */
+.game-card {
+  background: #152030;
+  border: 1px solid #1E3A52;
+  border-radius: 18px;
+  padding: 16px;
+  margin-bottom: 10px;
+}
+.score-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  margin-bottom: 12px;
+}
+.team-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+.team-block.right { flex-direction: row-reverse; }
+.team-logo {
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.1);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.team-info { display: flex; flex-direction: column; }
+.team-info.right { align-items: flex-end; }
+.team-name { font-size: 13px; font-weight: 700; color: #CCC; }
+.team-score {
+  font-size: 38px;
+  font-weight: 700;
+  color: #FFD700;
+  line-height: 1.1;
+}
+.center-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 0 8px;
+  min-width: 88px;
+}
+.inning-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+.vs-text { font-size: 18px; font-weight: 300; color: #555; }
+.info-time { font-size: 12px; color: #FFD700; font-weight: 500; }
+.info-sub  { font-size: 10px; color: #666; }
+
+.card-divider {
+  height: 1px;
+  background: #1A3550;
+  margin-bottom: 12px;
+}
+.pitcher-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pitcher-group { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.pb {
+  display: inline-block;
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.pb-lose { background: #3D1515; color: #FF6B6B; }
+.pb-win  { background: #0D3320; color: #4CD964; }
+.pb-save { background: #0D2040; color: #4A9EFF; }
+.pb-pit  { background: #2A2000; color: #FFD700; }
+.pb-bat  { background: #1A1A1A; color: #FFD700; border: 1px solid #333; }
+.pb-sel  { background: #1A2030; color: #8A9FBF; }
+.pb-hol  { background: #1A0A30; color: #A78FFF; }
+.pitcher-name { font-size: 12px; color: #CCC; }
+.pitcher-sep  { font-size: 10px; color: #444; }
+
+/* ── 양팀 순위 카드 ── */
+.rank-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.rank-card {
+  background: #1A1A2A;
+  border: 1px solid #222234;
+  border-radius: 12px;
+  padding: 10px;
+  text-align: center;
+}
+.rank-label { font-size: 10px; color: #666; margin-bottom: 3px; }
+.rank-num   { font-size: 28px; font-weight: 700; color: #FFD700; line-height: 1; }
+.rank-rec   { font-size: 10px; color: #555; margin-top: 3px; }
+
+/* ── 최근 10경기 ── */
+.recent-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.recent-card {
+  background: #1A1A2A;
+  border: 1px solid #222234;
+  border-radius: 12px;
+  padding: 10px;
+  text-align: center;
+}
+.recent-title { font-size: 10px; color: #666; margin-bottom: 7px; }
+.recent-badges { display: flex; gap: 2px; justify-content: center; margin-bottom: 2px; flex-wrap: wrap; }
+.rb {
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700;
+}
+.rb-w { background: #0D3320; color: #4CD964; }
+.rb-l { background: #3D1515; color: #FF6B6B; }
+.rb-d { background: #252525; color: #888; }
+
+/* ── 전체 구단 순위 ── */
+.ranking-card {
+  background: #1A1A2A;
+  border: 1px solid #222234;
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+.ranking-title { font-size: 10px; color: #666; margin-bottom: 8px; }
+.ranking-table { width: 100%; border-collapse: collapse; }
+.ranking-table th {
+  font-size: 9px;
+  color: #444455;
+  font-weight: 500;
+  padding: 0 2px 6px;
+  border-bottom: 1px solid #1E1E32;
+}
+.ranking-table th:first-child { text-align: left; }
+.ranking-table th.center { text-align: center; }
+.ranking-table th.right  { text-align: right; }
+.ranking-table td {
+  font-size: 10px;
+  padding: 5px 2px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  color: #CCC;
+}
+.ranking-table tr:last-child td { border-bottom: none; }
+.ranking-table td.rank  { color: #FFD700; font-weight: 600; width: 30px; }
+.ranking-table td.team  { width: 36px; }
+.ranking-table td.pct   { text-align: center; color: #666; width: 44px; }
+.ranking-table td.num   { text-align: right; color: #666; width: 26px; }
+.ranking-table td.streak-w { text-align: right; color: #4CD964; font-weight: 600; width: 36px; padding-left: 6px; }
+.ranking-table td.streak-l { text-align: right; color: #FF6B6B; font-weight: 600; width: 36px; padding-left: 6px; }
+.ranking-table tr.highlight td { background: rgba(255,215,0,0.06); }
+.ranking-table tr.highlight td.rank  { color: #FFD700; }
+.ranking-table tr.highlight td.team  { color: #FFD700; font-weight: 700; }
+.ranking-table tr.highlight td.pct   { color: #FFD700; }
+.ranking-table tr.highlight td.num   { color: #FFD700; }
+
+/* ── 로딩 ── */
+.loading {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 40px 0; color: #666; font-size: 13px;
+}
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid #333;
+  border-top-color: #FFD700;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.hidden { display: none !important; }
+
+/* ── 새로고침 버튼 ── */
+.refresh-btn {
+  width: 100%;
+  height: 36px;
+  background: transparent;
+  border: 1px solid #222234;
+  border-radius: 8px;
+  color: #666;
+  font-size: 12px;
+  cursor: pointer;
+  margin-bottom: 16px;
+  transition: all 0.15s;
+}
+.refresh-btn:hover { border-color: #FFD700; color: #FFD700; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- 설정 영역 -->
+  <div class="settings-card">
+    <div class="settings-title">KBO 위젯</div>
+    <div class="select-row">
+      <div class="select-item">
+        <div class="select-label">응원 팀</div>
+        <select id="sel-team">
+          <option value="">전체</option>
+          <option value="LG">LG</option>
+          <option value="KT">KT</option>
+          <option value="SSG">SSG</option>
+          <option value="NC">NC</option>
+          <option value="두산">두산</option>
+          <option value="KIA">KIA</option>
+          <option value="롯데">롯데</option>
+          <option value="삼성">삼성</option>
+          <option value="한화">한화</option>
+          <option value="키움">키움</option>
+        </select>
+      </div>
+      <div class="select-item">
+        <div class="select-label">IPTV</div>
+        <select id="sel-iptv">
+          <option value="">선택안함</option>
+          <option value="genie">지니TV (KT)</option>
+          <option value="Uplus">U+TV (LGU+)</option>
+          <option value="btv">BTV (SKT)</option>
+        </select>
+      </div>
+    </div>
+    <button class="save-btn" onclick="applySettings()">저장하고 새로고침</button>
+  </div>
+
+  <div class="status-msg" id="status-msg"></div>
+  <div class="divider"></div>
+
+  <!-- 로딩 -->
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <span>경기 정보 불러오는 중...</span>
+  </div>
+
+  <!-- 경기 정보 -->
+  <div id="game-info" class="hidden">
+
+    <div class="date-row">
+      <span class="date-text" id="game-date"></span>
+      <span class="status-badge" id="game-status-badge"></span>
+    </div>
+
+    <!-- 메인 경기 카드 -->
+    <div class="game-card">
+      <div class="score-row">
+        <!-- 원정팀 -->
+        <div class="team-block">
+          <img class="team-logo" id="away-logo" src="" alt="" onerror="this.style.display='none'"/>
+          <div class="team-info">
+            <span class="team-name" id="away-name"></span>
+            <span class="team-score hidden" id="away-score"></span>
+          </div>
+        </div>
+        <!-- 가운데 -->
+        <div class="center-info">
+          <span id="center-badge" class="hidden"></span>
+          <span class="info-time hidden" id="game-time"></span>
+          <span class="info-sub" id="stadium"></span>
+          <span class="info-sub" id="channel"></span>
+        </div>
+        <!-- 홈팀 -->
+        <div class="team-block right">
+          <img class="team-logo" id="home-logo" src="" alt="" onerror="this.style.display='none'"/>
+          <div class="team-info right">
+            <span class="team-name" id="home-name"></span>
+            <span class="team-score hidden" id="home-score"></span>
+          </div>
+        </div>
+      </div>
+      <div class="card-divider"></div>
+      <div class="pitcher-row" id="pitcher-row">
+        <div class="pitcher-group" id="away-pitcher"></div>
+        <div class="pitcher-group" id="home-pitcher"></div>
+      </div>
+    </div>
+
+    <!-- 양팀 순위 -->
+    <div class="rank-row">
+      <div class="rank-card">
+        <div class="rank-label" id="away-rank-label"></div>
+        <div class="rank-num" id="away-rank">-</div>
+        <div class="rank-rec" id="away-rank-rec"></div>
+      </div>
+      <div class="rank-card">
+        <div class="rank-label" id="home-rank-label"></div>
+        <div class="rank-num" id="home-rank">-</div>
+        <div class="rank-rec" id="home-rank-rec"></div>
+      </div>
+    </div>
+
+    <!-- 최근 10경기 -->
+    <div class="recent-row">
+      <div class="recent-card">
+        <div class="recent-title" id="away-recent-title">최근 10경기</div>
+        <div class="recent-badges" id="away-recent-1"></div>
+        <div class="recent-badges" id="away-recent-2"></div>
+      </div>
+      <div class="recent-card">
+        <div class="recent-title" id="home-recent-title">최근 10경기</div>
+        <div class="recent-badges" id="home-recent-1"></div>
+        <div class="recent-badges" id="home-recent-2"></div>
+      </div>
+    </div>
+
+    <!-- 전체 구단 순위 -->
+    <div class="ranking-card" id="ranking-card">
+      <div class="ranking-title">전체 구단 순위</div>
+      <table class="ranking-table">
+        <thead>
+          <tr>
+            <th>순위</th>
+            <th>팀</th>
+            <th class="center">승률</th>
+            <th class="right">승</th>
+            <th class="right">패</th>
+            <th class="right">무</th>
+            <th class="right" style="padding-left:6px;">연속</th>
+          </tr>
+        </thead>
+        <tbody id="ranking-body"></tbody>
+      </table>
+    </div>
+
+    <button class="refresh-btn" onclick="loadAll()">↻ 새로고침</button>
+  </div>
+
+</div>
+
+<script>
+const BASE = 'https://web-production-6aae76.up.railway.app';
+
+let state = {
+  team: localStorage.getItem('kbo_team') || '',
+  iptv: localStorage.getItem('kbo_iptv') || '',
+  away: '', home: '',
+  rankingCache: null,
+  rankingTime: 0,
+};
+
+// 저장된 설정 복원
+document.getElementById('sel-team').value = state.team;
+document.getElementById('sel-iptv').value = state.iptv;
+
+function applySettings() {
+  state.team = document.getElementById('sel-team').value;
+  state.iptv = document.getElementById('sel-iptv').value;
+  localStorage.setItem('kbo_team', state.team);
+  localStorage.setItem('kbo_iptv', state.iptv);
+  setStatus('저장완료! 팀: ' + (state.team || '전체'));
+  loadAll();
+}
+
+function setStatus(msg) {
+  document.getElementById('status-msg').textContent = msg;
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  return res.json();
+}
+
+// ── 메인 로드 ──
+async function loadAll() {
+  show('loading'); hide('game-info');
+
+  try {
+    const teamParam = state.team ? `?team=${encodeURIComponent(state.team)}` : '';
+    const scheduleData = await fetchJSON(`${BASE}/api/schedule/today${teamParam}`);
+    const games = scheduleData['경기목록'] || [];
+    const isTomorrow = scheduleData['내일경기'] || false;
+
+    if (games.length === 0) {
+      hide('loading');
+      setStatus('오늘 경기가 없습니다');
+      return;
+    }
+
+    const game = games[0];
+    state.away = game.away;
+    state.home = game.home;
+
+    // 기본 정보 세팅
+    document.getElementById('game-date').textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
+    document.getElementById('away-name').textContent = game.away;
+    document.getElementById('home-name').textContent = game.home;
+    document.getElementById('away-rank-label').textContent = `${game.away} 순위`;
+    document.getElementById('home-rank-label').textContent = `${game.home} 순위`;
+    document.getElementById('away-recent-title').textContent = `최근 10경기 · ${game.away}`;
+    document.getElementById('home-recent-title').textContent = `최근 10경기 · ${game.home}`;
+    document.getElementById('stadium').textContent = game.stadium || '';
+
+    // 로고
+    document.getElementById('away-logo').src = `${BASE}/logos/${game.away}`;
+    document.getElementById('home-logo').src = `${BASE}/logos/${game.home}`;
+
+    // 채널
+    await loadChannel(game.broadcast);
+
+    hide('loading');
+    show('game-info');
+
+    // 경기예정 초기 상태 (VS)
+    if (isTomorrow) {
+      setPreState(game.time);
+    }
+
+    // 병렬 로드
+    Promise.all([
+      loadScores(),
+      loadPitcher(),
+      loadRanking(),
+      loadRecent(game.away, 'away'),
+      loadRecent(game.home, 'home'),
+    ]);
+
+  } catch(e) {
+    hide('loading');
+    setStatus('데이터 로드 실패: ' + e.message);
+  }
+}
+
+// ── 채널 ──
+async function loadChannel(broadcast) {
+  const chName = broadcastName(broadcast);
+  if (!state.iptv || !broadcast || broadcast === 'tving') {
+    document.getElementById('channel').textContent = chName;
+    return;
+  }
+  try {
+    const data = await fetchJSON(`${BASE}/api/channel?iptv=${state.iptv}&broadcaster=${broadcast}`);
+    const ch = data['채널번호'] || '';
+    document.getElementById('channel').textContent = ch ? `${chName} ${ch}ch` : chName;
+  } catch { document.getElementById('channel').textContent = chName; }
+}
+
+function broadcastName(b) {
+  const map = {
+    spotv:'SPOTV', spotv2:'SPOTV2', kbs_n_sports:'KBS N스포츠',
+    mbc_sports:'MBC스포츠+', sbs_sports:'SBS스포츠',
+    kbs2:'KBS2', mbc:'MBC', sbs:'SBS', tving:'TVING'
+  };
+  return map[b] || b || '';
+}
+
+// ── 스코어 ──
+async function loadScores() {
+  try {
+    const data = await fetchJSON(`${BASE}/api/scores`);
+    const scores = data.scores || [];
+    const s = scores.find(x =>
+      (x.away === state.away && x.home === state.home) ||
+      (x.away === state.home && x.home === state.away)
+    );
+    if (!s) return;
+    updateScoreUI(s);
+  } catch(e) { console.warn('스코어 오류', e); }
+}
+
+function updateScoreUI(s) {
+  const badge = document.getElementById('center-badge');
+  const awayScoreEl = document.getElementById('away-score');
+  const homeScoreEl = document.getElementById('home-score');
+  const statusBadge = document.getElementById('game-status-badge');
+  const gameTime = document.getElementById('game-time');
+
+  if (s.status === '1') {
+    // 경기 중
+    awayScoreEl.textContent = s.away_score; show('away-score');
+    homeScoreEl.textContent = s.home_score; show('home-score');
+    badge.textContent = s.inning;
+    badge.className = 'inning-badge badge-live';
+    show('center-badge');
+    show('game-time');
+    statusBadge.textContent = `● ${s.inning}`;
+    statusBadge.className = 'status-badge badge-live';
+  } else if (s.status === '2') {
+    // 경기 종료
+    awayScoreEl.textContent = s.away_score; show('away-score');
+    homeScoreEl.textContent = s.home_score; show('home-score');
+    badge.textContent = '경기종료';
+    badge.className = 'inning-badge badge-ended';
+    show('center-badge');
+    hide('game-time');
+    statusBadge.textContent = '경기종료';
+    statusBadge.className = 'status-badge badge-ended';
+  }
+}
+
+function setPreState(time) {
+  const badge = document.getElementById('center-badge');
+  badge.textContent = 'VS';
+  badge.className = 'vs-text';
+  badge.style.display = 'block';
+  const gameTime = document.getElementById('game-time');
+  gameTime.textContent = `${time} 시작`;
+  show('game-time');
+  const statusBadge = document.getElementById('game-status-badge');
+  statusBadge.textContent = '경기 예정';
+  statusBadge.className = 'status-badge badge-pre';
+}
+
+// ── 투수/타자 ──
+async function loadPitcher() {
+  try {
+    const teamParam = state.team || state.away;
+    const data = await fetchJSON(`${BASE}/api/gameinfo?team=${encodeURIComponent(teamParam)}`);
+    renderPitchers('away-pitcher', data.away_pitchers || []);
+    renderPitchers('home-pitcher', data.home_pitchers || []);
+  } catch(e) { console.warn('투수 오류', e); }
+}
+
+function renderPitchers(containerId, pitchers) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = '';
+  pitchers.forEach((p, i) => {
+    if (!p.name) return;
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'pitcher-sep';
+      sep.textContent = ' / ';
+      el.appendChild(sep);
+    }
+    const badge = document.createElement('span');
+    badge.className = `pb ${labelClass(p.label)}`;
+    badge.textContent = p.label;
+    const name = document.createElement('span');
+    name.className = 'pitcher-name';
+    name.textContent = p.name;
+    el.appendChild(badge);
+    el.appendChild(name);
+  });
+}
+
+function labelClass(label) {
+  const map = { '투':'pb-pit','타':'pb-bat','승':'pb-win','패':'pb-lose','세':'pb-save','홀':'pb-hol','선발':'pb-sel' };
+  return map[label] || 'pb-sel';
+}
+
+// ── 순위 ──
+async function loadRanking() {
+  const now = Date.now();
+  if (state.rankingCache && now - state.rankingTime < 10 * 60 * 1000) {
+    renderRanking(state.rankingCache);
+    return;
+  }
+  try {
+    const data = await fetchJSON(`${BASE}/api/ranking`);
+    state.rankingCache = data.ranking || [];
+    state.rankingTime = Date.now();
+    renderRanking(state.rankingCache);
+  } catch(e) { console.warn('순위 오류', e); }
+}
+
+function renderRanking(ranking) {
+  const tbody = document.getElementById('ranking-body');
+  tbody.innerHTML = '';
+  let awayRank = '-', homeRank = '-', awayRec = '', homeRec = '';
+
+  ranking.forEach(r => {
+    const draw = parseInt(r.draw || '0', 10);
+    const rec = draw > 0 ? `${r.win}승 ${r.lose}패 ${r.draw}무` : `${r.win}승 ${r.lose}패`;
+    const isHL = state.team && r.team === state.team;
+    const isWin = (r.streak || '').includes('승');
+
+    if (r.team === state.away) { awayRank = `${r.rank}위`; awayRec = rec; }
+    if (r.team === state.home) { homeRank = `${r.rank}위`; homeRec = rec; }
+
+    const tr = document.createElement('tr');
+    if (isHL) tr.className = 'highlight';
+    tr.innerHTML = `
+      <td class="rank">${r.rank}위</td>
+      <td class="team">${r.team}</td>
+      <td class="pct">${r.pct}</td>
+      <td class="num">${r.win}</td>
+      <td class="num">${r.lose}</td>
+      <td class="num">${draw > 0 ? r.draw : '-'}</td>
+      <td class="${isWin ? 'streak-w' : 'streak-l'}">${r.streak || ''}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById('away-rank').textContent = awayRank;
+  document.getElementById('home-rank').textContent = homeRank;
+  document.getElementById('away-rank-rec').textContent = awayRec;
+  document.getElementById('home-rank-rec').textContent = homeRec;
+}
+
+// ── 최근 10경기 ──
+async function loadRecent(team, side) {
+  try {
+    const data = await fetchJSON(`${BASE}/api/recent?team=${encodeURIComponent(team)}`);
+    const recent = data.recent || [];
+    const row1 = document.getElementById(`${side}-recent-1`);
+    const row2 = document.getElementById(`${side}-recent-2`);
+    row1.innerHTML = ''; row2.innerHTML = '';
+    recent.forEach((r, i) => {
+      const cls = r === '승' ? 'rb-w' : r === '패' ? 'rb-l' : 'rb-d';
+      const div = document.createElement('div');
+      div.className = `rb ${cls}`;
+      div.textContent = r;
+      (i < 5 ? row1 : row2).appendChild(div);
+    });
+  } catch(e) { console.warn('최근경기 오류', e); }
+}
+
+// ── 유틸 ──
+function show(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('hidden');
+}
+function hide(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add('hidden');
+}
+
+// 초기 로드
+loadAll();
+</script>
+</body>
+</html>
