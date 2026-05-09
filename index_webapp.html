@@ -458,6 +458,7 @@ let state = {
   team: localStorage.getItem('kbo_team') || '',
   iptv: localStorage.getItem('kbo_iptv') || '',
   away: '', home: '',
+  gameTime: '',
   rankingCache: null,
   rankingTime: 0,
 };
@@ -503,6 +504,7 @@ async function loadAll() {
     const game = games[0];
     state.away = game.away;
     state.home = game.home;
+    state.gameTime = game.time;
 
     // 기본 정보 세팅
     document.getElementById('game-date').textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
@@ -524,10 +526,8 @@ async function loadAll() {
     hide('loading');
     show('game-info');
 
-    // 경기예정 초기 상태 (VS)
-    if (isTomorrow) {
-      setPreState(game.time);
-    }
+    // 경기예정 초기 상태 (VS + 시간 표시)
+    setPreState(game.time);
 
     // 병렬 로드
     Promise.all([
@@ -576,7 +576,11 @@ async function loadScores() {
       (x.away === state.away && x.home === state.home) ||
       (x.away === state.home && x.home === state.away)
     );
-    if (!s) return;
+    if (!s) {
+      // 스코어 없으면 경기예정 상태 유지 (시간 표시)
+      setPreState(state.gameTime || '');
+      return;
+    }
     updateScoreUI(s);
   } catch(e) { console.warn('스코어 오류', e); }
 }
