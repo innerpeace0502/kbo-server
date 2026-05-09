@@ -807,6 +807,12 @@ def get_recent_games(team, force=False):
                     score1 = int(m2.group(2))
                     score2 = int(m2.group(3))
 
+                    # 양쪽에 KBO 팀명이 없으면 실제 경기 점수가 아님 (시리즈 전적 등 오파싱 방지)
+                    if not any(t in team1 for t in KBO_TEAMS):
+                        continue
+                    if not any(t in m2.group(4) for t in KBO_TEAMS):
+                        continue
+
                     if team in team1:
                         result = '승' if score1 > score2 else ('패' if score1 < score2 else '무')
                     else:
