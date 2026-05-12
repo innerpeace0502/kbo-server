@@ -773,7 +773,6 @@ def get_recent_games(team, force=False):
             data = {
                 'leId': '1', 'srIdList': '0,9',
                 'seasonId': year, 'year': year,
-                # teamId 제거 - KBO API가 teamId 필터 시 rows:0 반환
                 'month': m, 'gameMonth': m, 'teamId': ''
             }
             try:
@@ -784,6 +783,12 @@ def get_recent_games(team, force=False):
                 rows = res.json().get('rows', [])
                 for row_obj in rows:
                     row = row_obj.get('row', [])
+
+                    # ✅ 취소 경기 제외 (우천취소, 취소 등)
+                    all_row_text = ' '.join([strip_html(c.get('Text', '')) for c in row])
+                    if '취소' in all_row_text or '우천' in all_row_text:
+                        continue
+
                     # play 클래스 셀(실제 점수 셀)만 확인
                     play_cell_obj = next((c for c in row if 'play' in (c.get('Class') or '')), None)
                     if play_cell_obj:
@@ -807,7 +812,11 @@ def get_recent_games(team, force=False):
                     score1 = int(m2.group(2))
                     score2 = int(m2.group(3))
 
-                    # 양쪽에 KBO 팀명이 없으면 실제 경기 점수가 아님 (시리즈 전적 등 오파싱 방지)
+                    # ✅ 0:0 경기 제외 (경기 전 또는 취소된 경기)
+                    if score1 == 0 and score2 == 0:
+                        continue
+
+                    # 양쪽에 KBO 팀명이 없으면 오파싱 방지
                     if not any(t in team1 for t in KBO_TEAMS):
                         continue
                     if not any(t in m2.group(4) for t in KBO_TEAMS):
