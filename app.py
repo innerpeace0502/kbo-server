@@ -1011,6 +1011,21 @@ def today_schedule():
     games     = get_kbo_schedule(today_str)
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
+
+    # ✅ 오늘 경기가 없으면 내일 경기 조회
+    if not games:
+        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
+        tomorrow     = today + timedelta(days=1)
+        games        = get_kbo_schedule(tomorrow_str)
+        if team:
+            games = [g for g in games if team in g['away'] or team in g['home']]
+        return jsonify({
+            '날짜': tomorrow.strftime('%Y-%m-%d'),
+            '경기목록': games,
+            '경기수': len(games),
+            '내일경기': True          # ✅ 앱/위젯에서 "내일 경기 예정" 표시용
+        })
+
     return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
 
 
