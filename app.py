@@ -74,9 +74,9 @@ channel_map = {
         "sbs":          "5",
     },
     "Uplus": {
-        "spotv": "107", "spotv2": "108", "kbs_n_sports": "133",
-        "mbc_sports": "130", "sbs_sports": "131",
-        "kbs2": "7", "mbc": "11", "sbs": "13",
+        "spotv": "107", "spotv2": "108", "kbs_n_sports": "105",
+        "mbc_sports": "106", "sbs_sports": "104",
+        "kbs2": "7", "mbc": "11", "sbs": "5",
     },
     "btv": {
         "spotv": "986", "spotv2": "982", "kbs_n_sports": "977",
