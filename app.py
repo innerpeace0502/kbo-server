@@ -1098,16 +1098,39 @@ def today_schedule():
         games        = get_kbo_schedule(tomorrow_str)
         if team:
             games = [g for g in games if team in g['away'] or team in g['home']]
-        games = _attach_pitcher_info(tomorrow_str, games)
         return jsonify({
             '날짜': tomorrow.strftime('%Y-%m-%d'),
             '경기목록': games,
             '경기수': len(games),
-            '내일경기': True          # ✅ 앱/위젯에서 "내일 경기 예정" 표시용
+            '내일경기': True
         })
 
-    games = _attach_pitcher_info(today_str, games)
     return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
+
+
+@app.route('/api/pitcher/today')
+def pitcher_today():
+    """선발투수 전용 API — 무거운 Selenium 호출을 schedule API와 분리"""
+    team      = request.args.get('team')
+    today_str = get_game_date()
+    today     = datetime.strptime(today_str, '%Y%m%d')
+    games     = get_kbo_schedule(today_str)
+    if team:
+        games = [g for g in games if team in g['away'] or team in g['home']]
+
+    if not games:
+        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
+        games        = get_kbo_schedule(tomorrow_str)
+        if team:
+            games = [g for g in games if team in g['away'] or team in g['home']]
+        games = _attach_pitcher_info(tomorrow_str, games)
+    else:
+        games = _attach_pitcher_info(today_str, games)
+
+    result = [{'away': g['away'], 'home': g['home'],
+               'away_pitcher': g.get('away_pitcher', ''),
+               'home_pitcher': g.get('home_pitcher', '')} for g in games]
+    return jsonify({'pitchers': result})
 
 
 @app.route('/api/schedule/<date>')
