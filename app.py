@@ -57,6 +57,11 @@ _TTL_GAMEINFO    = 120
 _TTL_RANKING     = 600
 _TTL_RECENT      = 600
 _TTL_SCHEDULE    = 300
+_TTL_PITCHER     = 3600  # 선발투수 캐시 1시간
+
+# 선발투수 캐시 {date_str: {away: (away_pitcher, home_pitcher)}}
+_pitcher_cache      = {}
+_pitcher_cache_time = {}
 
 
 # ─────────────────────────────────────────
@@ -1013,25 +1018,62 @@ def get_logo(team):
 
 
 def _attach_pitcher_info(date_str, games):
-    """게임 목록에 선발투수 정보 추가"""
+    """게임 목록에 선발투수 정보 추가 (캐시 적용, 경기 시작 후 스킵)"""
+    global _pitcher_cache, _pitcher_cache_time
+    now_ts = time_module.time()
+
+    # 현재 KST 시간
+    now_kst = datetime.now(KST)
+    now_hhmm = now_kst.hour * 60 + now_kst.minute  # 분 단위
+
     try:
         game_ids = get_game_id(date_str)
         for game in games:
-            away    = game['away']
+            away = game['away']
+            cache_key = f"{date_str}_{away}"
+
+            # ✅ 경기 시작 시간 파싱 (예: "18:30")
+            game_time_str = game.get('time', '')
+            try:
+                gh, gm = map(int, game_time_str.split(':'))
+                game_hhmm = gh * 60 + gm
+            except Exception:
+                game_hhmm = 18 * 60 + 30  # 파싱 실패 시 기본값
+
+            # ✅ 경기 시작 10분 이후면 투수 정보 스킵 (Selenium 호출 안 함)
+            if now_hhmm >= game_hhmm + 10:
+                game['away_pitcher'] = ''
+                game['home_pitcher'] = ''
+                continue
+
+            # ✅ 경기 시작 1시간 전부터 TTL 5분, 그 외 1시간
+            ttl = 300 if now_hhmm >= game_hhmm - 60 else _TTL_PITCHER
+
+            # ✅ 캐시 히트 → 즉시 반환
+            if cache_key in _pitcher_cache and \
+               now_ts - _pitcher_cache_time.get(cache_key, 0) < ttl:
+                game['away_pitcher'], game['home_pitcher'] = _pitcher_cache[cache_key]
+                continue
+
             game_id = game_ids.get(away)
             if game_id:
                 info = get_pitcher_from_gamecenter(date_str, game_id)
                 if info and info.get('status') == 'pre':
                     pa = info.get('away_pitchers', [])
                     ph = info.get('home_pitchers', [])
-                    game['away_pitcher'] = pa[0]['name'] if pa else ''
-                    game['home_pitcher'] = ph[0]['name'] if ph else ''
+                    ap = pa[0]['name'] if pa else ''
+                    hp = ph[0]['name'] if ph else ''
                 else:
-                    game['away_pitcher'] = ''
-                    game['home_pitcher'] = ''
+                    ap, hp = '', ''
             else:
-                game['away_pitcher'] = ''
-                game['home_pitcher'] = ''
+                ap, hp = '', ''
+
+            game['away_pitcher'] = ap
+            game['home_pitcher'] = hp
+            # 캐시 저장
+            _pitcher_cache[cache_key] = (ap, hp)
+            _pitcher_cache_time[cache_key] = now_ts
+
     except Exception as e:
         print(f"[선발투수 첨부 오류] {e}")
         for game in games:
