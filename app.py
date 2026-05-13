@@ -26,6 +26,7 @@ _gameinfo_cache      = {}
 _gameinfo_cache_time = {}
 _scores_cache      = []
 _scores_cache_time = 0
+_scores_cache_date = ""  # 캐시 날짜 (날짜 변경 시 만료)
 _recent_cache      = {}
 _recent_cache_time = {}
 
@@ -469,12 +470,12 @@ def _get_gamecenter_lines(today):
 
 def get_live_scores(force=False):
     """실시간 스코어 (GameCenter 스냅샷 공유)"""
-    global _scores_cache, _scores_cache_time
+    global _scores_cache, _scores_cache_time, _scores_cache_date
     now = time_module.time()
-    if not force and _scores_cache and now - _scores_cache_time < _TTL_SCORES:
-        return _scores_cache
-
     today = get_game_date()
+
+    if not force and _scores_cache and now - _scores_cache_time < _TTL_SCORES and _scores_cache_date == today:
+        return _scores_cache
     snap = _get_gamecenter_snapshot(today, force=force)
     if not snap:
         return _scores_cache
@@ -552,8 +553,14 @@ def get_live_scores(force=False):
         print(f"[스코어 파싱 오류] {e}")
 
     if scores:
-        _scores_cache = scores
+        _scores_cache      = scores
         _scores_cache_time = time_module.time()
+        _scores_cache_date = today
+        return scores
+    elif _scores_cache and _scores_cache_date == today:
+        # ✅ 파싱 결과 없어도 오늘 날짜 캐시가 있으면 유지
+        # (경기 종료 후 게임센터에서 데이터가 사라진 경우)
+        return _scores_cache
     return scores
 
 
