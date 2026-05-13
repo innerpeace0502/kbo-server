@@ -1012,7 +1012,6 @@ def get_logo(team):
     return resp
 
 
-@app.route('/api/schedule/today')
 def _attach_pitcher_info(date_str, games):
     """게임 목록에 선발투수 정보 추가"""
     try:
@@ -1041,6 +1040,7 @@ def _attach_pitcher_info(date_str, games):
     return games
 
 
+@app.route('/api/schedule/today')
 def today_schedule():
     team      = request.args.get('team')
     today_str = get_game_date()
