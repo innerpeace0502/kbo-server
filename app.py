@@ -1013,6 +1013,34 @@ def get_logo(team):
 
 
 @app.route('/api/schedule/today')
+def _attach_pitcher_info(date_str, games):
+    """게임 목록에 선발투수 정보 추가"""
+    try:
+        game_ids = get_game_id(date_str)
+        for game in games:
+            away    = game['away']
+            game_id = game_ids.get(away)
+            if game_id:
+                info = get_pitcher_from_gamecenter(date_str, game_id)
+                if info and info.get('status') == 'pre':
+                    pa = info.get('away_pitchers', [])
+                    ph = info.get('home_pitchers', [])
+                    game['away_pitcher'] = pa[0]['name'] if pa else ''
+                    game['home_pitcher'] = ph[0]['name'] if ph else ''
+                else:
+                    game['away_pitcher'] = ''
+                    game['home_pitcher'] = ''
+            else:
+                game['away_pitcher'] = ''
+                game['home_pitcher'] = ''
+    except Exception as e:
+        print(f"[선발투수 첨부 오류] {e}")
+        for game in games:
+            game.setdefault('away_pitcher', '')
+            game.setdefault('home_pitcher', '')
+    return games
+
+
 def today_schedule():
     team      = request.args.get('team')
     today_str = get_game_date()
@@ -1028,6 +1056,7 @@ def today_schedule():
         games        = get_kbo_schedule(tomorrow_str)
         if team:
             games = [g for g in games if team in g['away'] or team in g['home']]
+        games = _attach_pitcher_info(tomorrow_str, games)
         return jsonify({
             '날짜': tomorrow.strftime('%Y-%m-%d'),
             '경기목록': games,
@@ -1035,6 +1064,7 @@ def today_schedule():
             '내일경기': True          # ✅ 앱/위젯에서 "내일 경기 예정" 표시용
         })
 
+    games = _attach_pitcher_info(today_str, games)
     return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
 
 
