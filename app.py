@@ -552,9 +552,13 @@ def get_live_scores(force=False):
                             vs_idx = k
                             break
                     if vs_idx:
-                        away_score = lines[i+3]
-                        home_score = lines[vs_idx+1] if vs_idx+1 < len(lines) else ''
-                        if away_score.isdigit() and home_score.isdigit() and teams:
+                        # "두산 5" 같은 형태에서도 끝 숫자 추출
+                        def _ex(s):
+                            m = re.search(r'(\d+)\s*$', s)
+                            return m.group(1) if m else ''
+                        away_score = _ex(lines[i+3])
+                        home_score = _ex(lines[vs_idx+1]) if vs_idx+1 < len(lines) else ''
+                        if away_score and home_score and teams:
                             scores.append({
                                 'away': teams[0], 'home': teams[1],
                                 'away_score': away_score, 'home_score': home_score,
@@ -708,7 +712,16 @@ def get_pitcher_from_gamecenter(today, game_id, force=False):
                 away_pitchers = []
                 home_pitchers = []
 
+                # 점수 추출: lines[i+3]이 "5" 또는 "두산 5" 형태일 수 있으므로 끝 숫자 추출
+                def _extract_num(s):
+                    m = re.search(r'(\d+)\s*$', s)
+                    return m.group(1) if m else ''
+
+                away_score_str = _extract_num(lines[i+3]) if i+3 < len(lines) else ''
+                home_score_str = ''
+
                 if vs_idx:
+                    home_score_str = _extract_num(lines[vs_idx+1]) if vs_idx+1 < len(lines) else ''
                     for k in range(i+4, vs_idx):
                         raw = lines[k]
                         if not raw or raw[0] not in ('승','패','세','홀'):
@@ -726,6 +739,8 @@ def get_pitcher_from_gamecenter(today, game_id, force=False):
 
                 result = {
                     'status': 'ended',
+                    'away_score': away_score_str,
+                    'home_score': home_score_str,
                     'away_pitchers': away_pitchers,
                     'home_pitchers': home_pitchers,
                 }
@@ -1258,11 +1273,15 @@ def game_info():
         })
 
     return jsonify({
-        'game_id': game_id, 'away': away_name, 'home': home_name,
-        'status': gc['status'],
+        'game_id':      game_id,
+        'away':         away_name,
+        'home':         home_name,
+        'status':       gc['status'],
+        'away_score':   gc.get('away_score', ''),
+        'home_score':   gc.get('home_score', ''),
         'away_pitchers': gc.get('away_pitchers', []),
         'home_pitchers': gc.get('home_pitchers', []),
-        'updated': _fmt_ts(updated_ts)
+        'updated':      _fmt_ts(updated_ts)
     })
 
 
