@@ -27,6 +27,9 @@ _gameinfo_cache_time = {}
 _scores_cache      = []
 _scores_cache_time = 0
 _scores_cache_date = ""  # 캐시 날짜 (날짜 변경 시 만료)
+
+# 종료 스코어 파일 영속 경로 (Railway 재시작 후에도 최종 스코어 유지)
+_SCORES_PERSIST_FILE = '/tmp/kbo_scores_persist.json'
 _recent_cache      = {}
 _recent_cache_time = {}
 
@@ -63,6 +66,29 @@ _TTL_PITCHER     = 3600  # 선발투수 캐시 1시간
 # 선발투수 캐시 {date_str: {away: (away_pitcher, home_pitcher)}}
 _pitcher_cache      = {}
 _pitcher_cache_time = {}
+
+
+def _save_scores_persist(scores, date_str):
+    """경기 종료 스코어를 파일에 저장 (Railway 재시작 후 복원용)."""
+    try:
+        with open(_SCORES_PERSIST_FILE, 'w', encoding='utf-8') as f:
+            json_module.dump({'date': date_str, 'scores': scores}, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[persist 저장 오류] {e}")
+
+
+def _load_scores_persist():
+    """파일에서 종료 스코어 복원. 날짜가 오늘이면 반환, 아니면 []."""
+    try:
+        if not os.path.exists(_SCORES_PERSIST_FILE):
+            return []
+        with open(_SCORES_PERSIST_FILE, 'r', encoding='utf-8') as f:
+            data = json_module.load(f)
+        if data.get('date') == get_game_date():
+            return data.get('scores', [])
+    except Exception as e:
+        print(f"[persist 로드 오류] {e}")
+    return []
 
 
 # ─────────────────────────────────────────
@@ -474,6 +500,14 @@ def get_live_scores(force=False):
     now = time_module.time()
     today = get_game_date()
 
+    # 서버 시작 후 메모리 캐시가 비어있으면 파일에서 복원
+    if not _scores_cache:
+        persisted = _load_scores_persist()
+        if persisted:
+            _scores_cache      = persisted
+            _scores_cache_date = today
+            _scores_cache_time = now - _TTL_SCORES + 5  # 곧 갱신 시도하되 일단 반환 가능
+
     if not force and _scores_cache and now - _scores_cache_time < _TTL_SCORES and _scores_cache_date == today:
         return _scores_cache
     snap = _get_gamecenter_snapshot(today, force=force)
@@ -553,13 +587,31 @@ def get_live_scores(force=False):
         print(f"[스코어 파싱 오류] {e}")
 
     if scores:
+        # 종료(status=2)였던 경기를 진행 중(status=1)으로 되돌리지 않음
+        # (Selenium 실패로 오래된 스냅샷 재파싱 시 status 강등 방지)
+        if _scores_cache and _scores_cache_date == today:
+            ended = {(s['away'], s['home']) for s in _scores_cache if s.get('status') == '2'}
+            scores = [
+                next((c for c in _scores_cache
+                      if c['away'] == s['away'] and c['home'] == s['home']), s)
+                if (s['away'], s['home']) in ended and s.get('status') != '2'
+                else s
+                for s in scores
+            ]
+
         _scores_cache      = scores
         _scores_cache_time = time_module.time()
         _scores_cache_date = today
+
+        # 경기 종료 스코어가 있으면 파일에 영속 저장 (서버 재시작 후 복원)
+        if any(s.get('status') == '2' for s in scores):
+            _save_scores_persist(scores, today)
+
         return scores
     elif _scores_cache and _scores_cache_date == today:
-        # ✅ 파싱 결과 없어도 오늘 날짜 캐시가 있으면 유지
+        # 파싱 결과 없어도 오늘 날짜 캐시가 있으면 유지
         # (경기 종료 후 게임센터에서 데이터가 사라진 경우)
+        _scores_cache_time = time_module.time()  # TTL 리셋: 미갱신 시에도 재호출 폭주 방지
         return _scores_cache
     return scores
 
@@ -861,8 +913,7 @@ def get_recent_games(team, force=False):
 def _warm_caches_once():
     try:
         today = get_game_date()
-        _get_gamecenter_snapshot(today, force=True)
-        get_live_scores(force=True)
+        get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
 
         try:
             game_ids = get_game_id(today)
