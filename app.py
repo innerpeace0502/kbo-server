@@ -15,6 +15,13 @@ import random
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
+# ✅ 응답 gzip 압축 (flask-compress 사용 가능시 자동, 없으면 폴백)
+try:
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    pass
+
 KST = timezone(timedelta(hours=9))
 
 # ─────────────────────────────────────────
@@ -1053,11 +1060,15 @@ def webapp():
 
 @app.route('/logos/<team>')
 def get_logo(team):
+    from flask import make_response
     filename = LOGO_FILES.get(team)
     if filename:
         png_path = os.path.join('static', 'logos', filename)
         if os.path.exists(png_path):
-            return send_from_directory('static/logos', filename)
+            resp = make_response(send_from_directory('static/logos', filename))
+            resp.headers['Cache-Control'] = 'public, max-age=86400'
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            return resp
 
     from PIL import Image, ImageDraw, ImageFont
     import io
@@ -1084,9 +1095,9 @@ def get_logo(team):
     img_data = io.BytesIO()
     img.save(img_data, format='PNG')
     img_data.seek(0)
-    from flask import make_response
     resp = make_response(send_file(img_data, mimetype='image/png'))
-    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['Cache-Control'] = 'public, max-age=3600'
+    resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
 
 

@@ -1,5 +1,6 @@
 flask
 flask-cors
+flask-compress
 requests
 beautifulsoup4
 lxml

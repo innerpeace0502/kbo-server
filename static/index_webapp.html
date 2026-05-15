@@ -370,7 +370,7 @@ body {
       <div class="score-row">
         <!-- 원정팀 -->
         <div class="team-block">
-          <img class="team-logo" id="away-logo" src="" alt="" onerror="this.style.display='none'"/>
+          <img class="team-logo" id="away-logo" src="" alt=""/>
           <div class="team-info">
             <span class="team-name" id="away-name"></span>
             <span class="team-score hidden" id="away-score"></span>
@@ -385,7 +385,7 @@ body {
         </div>
         <!-- 홈팀 -->
         <div class="team-block right">
-          <img class="team-logo" id="home-logo" src="" alt="" onerror="this.style.display='none'"/>
+          <img class="team-logo" id="home-logo" src="" alt=""/>
           <div class="team-info right">
             <span class="team-name" id="home-name"></span>
             <span class="team-score hidden" id="home-score"></span>
@@ -514,9 +514,20 @@ async function loadAll() {
     document.getElementById('home-recent-title').textContent = `최근 10경기 · ${game.home}`;
     document.getElementById('stadium').textContent = game.stadium || '';
 
-    // 로고
-    document.getElementById('away-logo').src = `${BASE}/logos/${game.away}`;
-    document.getElementById('home-logo').src = `${BASE}/logos/${game.home}`;
+    // 로고 (한글 팀명 URL 안전 인코딩 + 로드 실패 시 fallback SVG)
+    const awayLogoEl = document.getElementById('away-logo');
+    const homeLogoEl = document.getElementById('home-logo');
+    const logoFallback = (team) => {
+      const initials = team.slice(0, 2);
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60"><circle cx="30" cy="30" r="30" fill="#2a3040"/><text x="30" y="38" font-size="22" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-weight="700">${initials}</text></svg>`;
+      return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+    };
+    awayLogoEl.style.display = '';
+    homeLogoEl.style.display = '';
+    awayLogoEl.onerror = function(){ this.onerror=null; this.src = logoFallback(game.away); };
+    homeLogoEl.onerror = function(){ this.onerror=null; this.src = logoFallback(game.home); };
+    awayLogoEl.src = `${BASE}/logos/${encodeURIComponent(game.away)}`;
+    homeLogoEl.src = `${BASE}/logos/${encodeURIComponent(game.home)}`;
 
     // 채널
     await loadChannel(game.broadcast);
