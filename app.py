@@ -270,6 +270,85 @@ def _cleanup_driver():
 atexit.register(_cleanup_driver)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ChromeManager: Selenium Chrome의 lifecycle을 명시적으로 관리하는 단일 책임 클래스
+#
+# 비유: 자동차에 비유하면 _driver는 "엔진", _driver_lock은 "키"이고,
+#       ChromeManager는 "엔진을 언제 켜고 끌지 결정하는 운전기사"이다.
+#       기존 엔진/키는 그대로 두고, 이 클래스가 그 위에 얇은 wrapper로 얹힌다.
+#
+# 이 커밋(커밋 2)에서는 클래스 정의만 추가하고 어디서도 사용하지 않는다.
+# 다음 커밋에서 chrome = ChromeManager() 인스턴스를 만들어 활용한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChromeManager:
+    """Chrome 드라이버의 ON/OFF 상태를 추적하고 lifecycle을 관리한다.
+
+    - start(reason): 켜진 상태로 마킹. 실제 드라이버는 _fetch_body_text에서 lazy 생성.
+    - stop(reason): 기존 _cleanup_driver()를 위임 호출하여 드라이버 종료.
+    - is_active(): 현재 켜진 상태인지 (API 라우트에서 분기 판단용).
+    - mode(): 현재 모드 문자열 (응답에 chrome_mode로 노출용).
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()  # 재진입 가능 락 (start->stop 위임 호출 대비)
+        self._active = False
+        self._mode = "off"
+
+    def start(self, reason=""):
+        with self._lock:
+            if self._active:
+                # 이미 켜져 있으면 reason만 업데이트 (모드 전환 케이스)
+                if reason:
+                    self._mode = reason
+                return
+            self._active = True
+            self._mode = reason or "manual"
+            print(f"[ChromeManager] ON ({reason or 'manual'}) at {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def stop(self, reason=""):
+        with self._lock:
+            if not self._active:
+                return
+            self._active = False
+            self._mode = "off"
+            # 기존 검증된 정리 함수에 위임 (RLock 재진입 OK)
+            try:
+                _cleanup_driver()
+            except Exception as e:
+                print(f"[ChromeManager] 드라이버 정리 중 예외 무시: {e}")
+            print(f"[ChromeManager] OFF ({reason or 'manual'}) at {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def is_active(self):
+        with self._lock:
+            return self._active
+
+    def mode(self):
+        with self._lock:
+            return self._mode
+
+
+class _AlwaysOnChromeManager:
+    """CHROME_ALWAYS_ON=true 모드용 더미. is_active()가 항상 True.
+
+    이 더미를 쓰면 새로 추가될 가드 로직(`if not chrome.is_active()`)이
+    항상 통과하여 기존 24시간 ON 동작과 100% 동일하게 작동한다.
+    긴급 롤백용 안전장치.
+    """
+
+    def start(self, reason=""):
+        pass  # no-op
+
+    def stop(self, reason=""):
+        pass  # no-op (강제로 끄지 않음 - 항상 ON 유지)
+
+    def is_active(self):
+        return True
+
+    def mode(self):
+        return "always_on"
+
+
 def _fetch_body_text(url, wait_patterns=None, max_wait=12):
     """Selenium 페이지를 가져와 body 텍스트 반환. 드라이버 재사용 + 직렬화.
 
