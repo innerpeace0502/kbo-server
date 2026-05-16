@@ -1038,10 +1038,48 @@ def get_recent_games(team, force=False):
 # 백그라운드 프리워밍 (위젯 자동갱신 체감 속도의 핵심)
 # ─────────────────────────────────────────
 
+def _all_games_ended(scores):
+    """모든 경기가 종료/취소되었는지 판정.
+    status='2'(경기종료) 또는 inning에 '종료'/'취소'/'우천' 포함이면 끝난 경기로 본다.
+    빈 리스트면 False (경기 없음은 별도 처리).
+    """
+    if not scores:
+        return False
+    for s in scores:
+        status = (s.get('status') or '').strip()
+        inning = (s.get('inning') or '').strip()
+        if status == '2':
+            continue
+        if '종료' in inning or '취소' in inning or '우천' in inning:
+            continue
+        return False  # 하나라도 진행중/예정이면 False
+    return True
+
+
+def _schedule_early_stop(minutes=5):
+    """모든 경기 종료 감지 시 N분 후 stop_game_mode 발사 예약 (중복 방지).
+    CHROME_ALWAYS_ON=true 모드에서는 호출되지 않음 (chrome.is_active() 가드)."""
+    try:
+        # 이미 예약된 stop이 있으면 중복 등록 안 함
+        for j in schedule.jobs:
+            if 'game_stop_once' in j.tags:
+                return
+        target = datetime.now(KST) + timedelta(minutes=minutes)
+        schedule.every().day.at(target.strftime('%H:%M')).do(stop_game_mode).tag('game_stop_once')
+        print(f"[scheduler] 모든 경기 종료 감지 - {minutes}분 후 ({target.strftime('%H:%M')}) Chrome OFF 예약")
+    except Exception as e:
+        print(f"[scheduler] _schedule_early_stop 오류: {e}")
+
+
 def _warm_caches_once():
     try:
         today = get_game_date()
-        get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
+        scores = get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
+
+        # ✅ 경기 종료 자동 감지 (CHROME_ALWAYS_ON=false 모드에서만 의미 있음)
+        # CHROME_ALWAYS_ON=true 모드에서도 동작은 하지만 stop_game_mode가 no-op라 영향 없음
+        if not _CHROME_ALWAYS_ON and scores and _all_games_ended(scores):
+            _schedule_early_stop(minutes=5)
 
         try:
             game_ids = get_game_id(today)
@@ -1078,6 +1116,11 @@ def _bg_refresh_loop():
     while True:
         interval = 300  # 기본: 5분
         try:
+            # ✅ Chrome OFF 가드: 절전 모드면 프리워밍 자체를 스킵 (메모리·CPU 절약 핵심)
+            # _AlwaysOnChromeManager에서는 is_active()가 항상 True라 이 분기 통과 (기존 동작 유지)
+            if not chrome.is_active():
+                time_module.sleep(60)
+                continue
             now_kst = datetime.now(KST)
             hour = now_kst.hour
             # 경기 시간대: KST 14시~다음날 2시
