@@ -11,7 +11,6 @@ import atexit
 import gzip
 import hashlib
 import random
-import schedule  # Chrome 절전 모드 스케줄러용 (매일 03:55 트리거)
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
@@ -269,111 +268,6 @@ def _cleanup_driver():
 
 
 atexit.register(_cleanup_driver)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ChromeManager: Selenium Chrome의 lifecycle을 명시적으로 관리하는 단일 책임 클래스
-#
-# 비유: 자동차에 비유하면 _driver는 "엔진", _driver_lock은 "키"이고,
-#       ChromeManager는 "엔진을 언제 켜고 끌지 결정하는 운전기사"이다.
-#       기존 엔진/키는 그대로 두고, 이 클래스가 그 위에 얇은 wrapper로 얹힌다.
-#
-# 이 커밋(커밋 2)에서는 클래스 정의만 추가하고 어디서도 사용하지 않는다.
-# 다음 커밋에서 chrome = ChromeManager() 인스턴스를 만들어 활용한다.
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ChromeManager:
-    """Chrome 드라이버의 ON/OFF 상태를 추적하고 lifecycle을 관리한다.
-
-    - start(reason): 켜진 상태로 마킹. 실제 드라이버는 _fetch_body_text에서 lazy 생성.
-    - stop(reason): 기존 _cleanup_driver()를 위임 호출하여 드라이버 종료.
-    - is_active(): 현재 켜진 상태인지 (API 라우트에서 분기 판단용).
-    - mode(): 현재 모드 문자열 (응답에 chrome_mode로 노출용).
-    """
-
-    def __init__(self):
-        self._lock = threading.RLock()  # 재진입 가능 락 (start->stop 위임 호출 대비)
-        self._active = False
-        self._mode = "off"
-
-    def start(self, reason=""):
-        with self._lock:
-            if self._active:
-                # 이미 켜져 있으면 reason만 업데이트 (모드 전환 케이스)
-                if reason:
-                    self._mode = reason
-                return
-            self._active = True
-            self._mode = reason or "manual"
-            print(f"[ChromeManager] ON ({reason or 'manual'}) at {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
-
-    def stop(self, reason=""):
-        with self._lock:
-            if not self._active:
-                return
-            self._active = False
-            self._mode = "off"
-            # 기존 검증된 정리 함수에 위임 (RLock 재진입 OK)
-            try:
-                _cleanup_driver()
-            except Exception as e:
-                print(f"[ChromeManager] 드라이버 정리 중 예외 무시: {e}")
-            print(f"[ChromeManager] OFF ({reason or 'manual'}) at {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
-
-    def is_active(self):
-        with self._lock:
-            return self._active
-
-    def mode(self):
-        with self._lock:
-            return self._mode
-
-
-class _AlwaysOnChromeManager:
-    """CHROME_ALWAYS_ON=true 모드용 더미. is_active()가 항상 True.
-
-    이 더미를 쓰면 새로 추가될 가드 로직(`if not chrome.is_active()`)이
-    항상 통과하여 기존 24시간 ON 동작과 100% 동일하게 작동한다.
-    긴급 롤백용 안전장치.
-    """
-
-    def start(self, reason=""):
-        pass  # no-op
-
-    def stop(self, reason=""):
-        pass  # no-op (강제로 끄지 않음 - 항상 ON 유지)
-
-    def is_active(self):
-        return True
-
-    def mode(self):
-        return "always_on"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Chrome lifecycle 모드 선택
-#
-# 환경변수 CHROME_ALWAYS_ON으로 동작 모드를 전환한다.
-#   - "true"  (기본값, 이 커밋 시점): 기존 24시간 ON 동작. _AlwaysOnChromeManager 사용.
-#   - "false": 새로운 절전 모드. ChromeManager 사용 (실제 ON/OFF 분기).
-#
-# 이 커밋(커밋 3)에서는 chrome 인스턴스만 생성하고, 아직 어디서도 chrome.is_active()
-# 같은 메서드를 호출하지 않는다. 따라서 부팅 동작은 여전히 100% 기존과 동일하다.
-#
-# 향후 커밋에서 API 라우트와 _bg_refresh_loop에 chrome.is_active() 가드를 추가하면,
-# 그때 비로소 CHROME_ALWAYS_ON=false 모드의 효과가 발휘된다.
-#
-# 긴급 롤백: Railway Variables에서 CHROME_ALWAYS_ON=true 설정 → 즉시 기존 동작 복귀.
-# ─────────────────────────────────────────────────────────────────────────────
-
-_CHROME_ALWAYS_ON = os.environ.get('CHROME_ALWAYS_ON', 'false').lower() == 'true'
-
-if _CHROME_ALWAYS_ON:
-    chrome = _AlwaysOnChromeManager()
-    print(f"[boot] CHROME_ALWAYS_ON=true → 기존 24시간 ON 모드 (always_on dummy)")
-else:
-    chrome = ChromeManager()
-    print(f"[boot] CHROME_ALWAYS_ON=false → 절전 모드 (lifecycle managed)")
 
 
 def _fetch_body_text(url, wait_patterns=None, max_wait=12):
@@ -1038,48 +932,10 @@ def get_recent_games(team, force=False):
 # 백그라운드 프리워밍 (위젯 자동갱신 체감 속도의 핵심)
 # ─────────────────────────────────────────
 
-def _all_games_ended(scores):
-    """모든 경기가 종료/취소되었는지 판정.
-    status='2'(경기종료) 또는 inning에 '종료'/'취소'/'우천' 포함이면 끝난 경기로 본다.
-    빈 리스트면 False (경기 없음은 별도 처리).
-    """
-    if not scores:
-        return False
-    for s in scores:
-        status = (s.get('status') or '').strip()
-        inning = (s.get('inning') or '').strip()
-        if status == '2':
-            continue
-        if '종료' in inning or '취소' in inning or '우천' in inning:
-            continue
-        return False  # 하나라도 진행중/예정이면 False
-    return True
-
-
-def _schedule_early_stop(minutes=5):
-    """모든 경기 종료 감지 시 N분 후 stop_game_mode 발사 예약 (중복 방지).
-    CHROME_ALWAYS_ON=true 모드에서는 호출되지 않음 (chrome.is_active() 가드)."""
-    try:
-        # 이미 예약된 stop이 있으면 중복 등록 안 함
-        for j in schedule.jobs:
-            if 'game_stop_once' in j.tags:
-                return
-        target = datetime.now(KST) + timedelta(minutes=minutes)
-        schedule.every().day.at(target.strftime('%H:%M')).do(stop_game_mode).tag('game_stop_once')
-        print(f"[scheduler] 모든 경기 종료 감지 - {minutes}분 후 ({target.strftime('%H:%M')}) Chrome OFF 예약")
-    except Exception as e:
-        print(f"[scheduler] _schedule_early_stop 오류: {e}")
-
-
 def _warm_caches_once():
     try:
         today = get_game_date()
-        scores = get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
-
-        # ✅ 경기 종료 자동 감지 (CHROME_ALWAYS_ON=false 모드에서만 의미 있음)
-        # CHROME_ALWAYS_ON=true 모드에서도 동작은 하지만 stop_game_mode가 no-op라 영향 없음
-        if not _CHROME_ALWAYS_ON and scores and _all_games_ended(scores):
-            _schedule_early_stop(minutes=5)
+        get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
 
         try:
             game_ids = get_game_id(today)
@@ -1116,11 +972,6 @@ def _bg_refresh_loop():
     while True:
         interval = 300  # 기본: 5분
         try:
-            # ✅ Chrome OFF 가드: 절전 모드면 프리워밍 자체를 스킵 (메모리·CPU 절약 핵심)
-            # _AlwaysOnChromeManager에서는 is_active()가 항상 True라 이 분기 통과 (기존 동작 유지)
-            if not chrome.is_active():
-                time_module.sleep(60)
-                continue
             now_kst = datetime.now(KST)
             hour = now_kst.hour
             # 경기 시간대: KST 14시~다음날 2시
@@ -1144,172 +995,6 @@ def _start_background():
     t = threading.Thread(target=_bg_refresh_loop, daemon=True, name='wbb-prewarm')
     t.start()
     print("[prewarm] background thread started")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Chrome 절전 모드 스케줄러
-#
-# 매일 03:55에 morning_schedule_fetch()를 자동 실행하여 오늘 경기 일정을 받고
-# 첫 경기 -2h05m에 start_game_mode, +5m에 stop_game_mode를 예약한다.
-#
-# CHROME_ALWAYS_ON=true에서는 _start_scheduler()가 no-op (스케줄러 미기동).
-# TEST_MODE=true에서는 트리거 시각을 가까운 미래로 재배치하여 5분 안에 전 사이클 시연.
-#
-# 시간대 처리: schedule 라이브러리는 시스템 로컬 시간을 사용한다.
-# Railway 배포 시 환경변수 TZ=Asia/Seoul 설정 필수 (그러면 컨테이너 시계가 KST가 되어
-# schedule.every().day.at("03:55")가 KST 03:55에 발사).
-#
-# 이 커밋(커밋 4)에서는 함수들과 _start_scheduler() 호출까지 추가되지만,
-# 기본값 CHROME_ALWAYS_ON=true 상태에서는 스케줄러가 기동되지 않아 부팅 동작 100% 동일.
-# 절전 모드(false)로 띄우려면 환경변수를 명시적으로 설정해야 한다.
-# ─────────────────────────────────────────────────────────────────────────────
-
-_scheduler_started = False
-_scheduler_started_lock = threading.Lock()
-
-
-def _is_test_mode():
-    """TEST_MODE=true이면 트리거 시각을 가까운 미래로 재배치 (로컬 5분 시연용)."""
-    return os.environ.get('TEST_MODE', 'false').lower() == 'true'
-
-
-def _parse_first_game_time(games, date_str):
-    """일정에서 가장 빠른 경기 시작 시각(datetime, KST). 없으면 None."""
-    if not games:
-        return None
-    year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
-    earliest = None
-    for g in games:
-        t = (g.get('time') or '').strip()
-        if not re.match(r'^\d{1,2}:\d{2}$', t):
-            continue
-        hh, mm = map(int, t.split(':'))
-        dt = datetime(year, month, day, hh, mm, tzinfo=KST)
-        if earliest is None or dt < earliest:
-            earliest = dt
-    return earliest
-
-
-def _estimate_last_game_end(games, date_str):
-    """일정에서 가장 늦은 경기 시작 시각 + 4시간(평균 경기 길이). 없으면 None."""
-    if not games:
-        return None
-    year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
-    latest = None
-    for g in games:
-        t = (g.get('time') or '').strip()
-        if not re.match(r'^\d{1,2}:\d{2}$', t):
-            continue
-        hh, mm = map(int, t.split(':'))
-        dt = datetime(year, month, day, hh, mm, tzinfo=KST)
-        if latest is None or dt > latest:
-            latest = dt
-    return latest + timedelta(hours=4) if latest else None
-
-
-def morning_schedule_fetch():
-    """매일 03:55 트리거. 오늘 일정 받고 게임 모드 예약 후 Chrome OFF.
-    휴식일(경기 없음)은 즉시 OFF하고 다음 날 03:55까지 대기."""
-    try:
-        today = get_game_date()
-        chrome.start("morning_schedule_fetch")
-        # 일정은 _get_schedule_rows()로 받지만 Selenium 사용 안 함 (일반 HTTP)
-        games = get_kbo_schedule(today)
-        if not games:
-            print(f"[scheduler] {today} 경기 없음 - 휴식일, 다음 03:55까지 대기")
-        else:
-            first_start = _parse_first_game_time(games, today)
-            last_end = _estimate_last_game_end(games, today)
-            if first_start and last_end:
-                _schedule_game_mode(first_start, last_end)
-                start_at = (first_start - timedelta(hours=2, minutes=5)).strftime('%H:%M')
-                stop_at = (last_end + timedelta(minutes=5)).strftime('%H:%M')
-                print(f"[scheduler] 게임 모드 예약: ON {start_at} (첫경기 -2h05m) / OFF {stop_at} (마지막 +5m)")
-            else:
-                print(f"[scheduler] {today} 경기 시각 파싱 실패 - 게임 모드 예약 생략")
-    except Exception as e:
-        print(f"[scheduler] morning_schedule_fetch 오류: {e}")
-    finally:
-        chrome.stop("morning_schedule_fetch_done")
-
-
-def start_game_mode():
-    """첫 경기 -2h05m 트리거. Chrome ON 마킹. _bg_refresh_loop가 활성화됨."""
-    chrome.start("game_mode")
-    print(f"[scheduler] 게임 모드 시작 - 실시간 스크래핑 ON")
-    return schedule.CancelJob  # 일회성 (다음 날 morning_schedule_fetch가 재예약)
-
-
-def stop_game_mode():
-    """마지막 경기 +5m 또는 종료 감지 후 트리거. Chrome OFF + 다음 날 준비."""
-    chrome.stop("game_mode_end")
-    print(f"[scheduler] 게임 모드 종료 - Chrome OFF")
-    _reschedule_next_morning()
-    return schedule.CancelJob
-
-
-def _schedule_game_mode(first_game_kst, last_game_kst):
-    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반)."""
-    start_at = (first_game_kst - timedelta(hours=2, minutes=5)).strftime('%H:%M')
-    stop_at = (last_game_kst + timedelta(minutes=5)).strftime('%H:%M')
-    schedule.clear('game_start_once')
-    schedule.clear('game_stop_once')
-    schedule.every().day.at(start_at).do(start_game_mode).tag('game_start_once')
-    schedule.every().day.at(stop_at).do(stop_game_mode).tag('game_stop_once')
-
-
-def _reschedule_next_morning():
-    """일회성 game_* 태그를 정리. 다음 날 03:55 morning_schedule_fetch는
-    영구 등록되어 있어 자동으로 재발사된다."""
-    schedule.clear('game_start_once')
-    schedule.clear('game_stop_once')
-
-
-def _scheduler_loop():
-    """schedule.run_pending()을 주기적으로 호출하는 워커 스레드.
-    TEST_MODE면 1초마다, 평상시 20초마다 체크."""
-    time_module.sleep(2)
-    while True:
-        try:
-            schedule.run_pending()
-        except Exception as e:
-            print(f"[scheduler loop 오류] {e}")
-        time_module.sleep(1 if _is_test_mode() else 20)
-
-
-def _start_scheduler():
-    """스케줄러 기동. CHROME_ALWAYS_ON=true면 no-op.
-    WBB_DISABLE_PREWARM은 prewarm 전용 플래그라 여기서는 무시 (스케줄러는 별개)."""
-    global _scheduler_started
-    if _CHROME_ALWAYS_ON:
-        print("[scheduler] CHROME_ALWAYS_ON=true → 스케줄러 비활성 (기존 동작 유지)")
-        return
-    if os.environ.get('WBB_DISABLE_SCHEDULER') == '1':
-        # 스케줄러 전용 비활성화 (운영 비상시 토글용, 기본은 활성)
-        print("[scheduler] WBB_DISABLE_SCHEDULER=1 → 스케줄러 비활성")
-        return
-    with _scheduler_started_lock:
-        if _scheduler_started:
-            return
-        _scheduler_started = True
-
-    if _is_test_mode():
-        # 테스트: 가까운 미래로 트리거 시각 재배치 (시계 자체를 건드리지 않음)
-        now = datetime.now(KST)
-        t1 = (now + timedelta(minutes=1)).strftime('%H:%M')
-        t2 = (now + timedelta(minutes=2)).strftime('%H:%M')
-        t3 = (now + timedelta(minutes=5)).strftime('%H:%M')
-        schedule.every().day.at(t1).do(morning_schedule_fetch).tag('test')
-        schedule.every().day.at(t2).do(start_game_mode).tag('test')
-        schedule.every().day.at(t3).do(stop_game_mode).tag('test')
-        print(f"[TEST_MODE] schedule_fetch={t1} game_start={t2} game_stop={t3}")
-    else:
-        schedule.every().day.at("03:55").do(morning_schedule_fetch).tag('morning')
-        print(f"[scheduler] 매일 03:55에 morning_schedule_fetch 예약 (시스템 로컬 시간 기준 - Railway는 TZ=Asia/Seoul 필요)")
-
-    t = threading.Thread(target=_scheduler_loop, daemon=True, name='kbo-scheduler')
-    t.start()
-    print("[scheduler] background thread started")
 
 
 # ─────────────────────────────────────────
@@ -1416,55 +1101,6 @@ def get_logo(team):
     return resp
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Chrome 절전 모드용 응답 헬퍼
-#
-# Chrome OFF 상태에서 API 호출이 오면:
-#   1) 캐시가 있으면 캐시 + cached_at(언제 캐시되었는지) 반환
-#   2) 캐시도 없으면 빈 결과 + 200 OK 반환 (안드로이드 앱 크래시 방지)
-#
-# 기존 응답 키(scores, ranking, updated 등)는 유지하고
-# 새 키(cached_at, note, chrome_mode)만 추가하여 하위 호환성 확보.
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _iso_kst(ts):
-    """Unix 타임스탬프를 ISO 8601 KST 문자열로. None/0이면 None."""
-    if not ts:
-        return None
-    try:
-        return datetime.fromtimestamp(ts, KST).isoformat()
-    except Exception:
-        return None
-
-
-def _empty_payload(kind):
-    """Chrome OFF + 캐시 없음 상태의 표준 빈 응답.
-    안드로이드 앱 호환을 위해 기존 응답의 모든 키를 빈 값으로 채워서 반환."""
-    base = {
-        'cached_at': None,
-        'note': '서버 절전 모드 - 경기 시간대에 다시 시도해주세요',
-        'chrome_mode': chrome.mode(),
-        'updated': '',
-    }
-    if kind == 'scores':
-        base['scores'] = []
-    elif kind == 'ranking':
-        base['ranking'] = []
-    elif kind == 'recent':
-        base['recent'] = []
-        base['team'] = ''
-    elif kind == 'gameinfo':
-        base.update({
-            'game_id': '', 'away': '', 'home': '',
-            'status': 'off',
-            'away_score': '', 'home_score': '',
-            'away_pitchers': [], 'home_pitchers': [],
-        })
-    elif kind == 'pitcher':
-        base['pitchers'] = []
-    return base
-
-
 def _attach_pitcher_info(date_str, games):
     """게임 목록에 선발투수 정보 추가 (캐시 적용, 경기 시작 후 스킵)"""
     global _pitcher_cache, _pitcher_cache_time
@@ -1559,9 +1195,6 @@ def today_schedule():
 @app.route('/api/pitcher/today')
 def pitcher_today():
     """선발투수 전용 API — 무거운 Selenium 호출을 schedule API와 분리"""
-    # Chrome OFF 가드: 투수 정보는 Selenium 호출이 필요해서 캐시 없으면 빈 응답
-    if not chrome.is_active():
-        return jsonify(_empty_payload('pitcher'))
     team      = request.args.get('team')
     today_str = get_game_date()
     today     = datetime.strptime(today_str, '%Y%m%d')
@@ -1615,21 +1248,6 @@ def channel():
 @app.route('/api/scores')
 def live_scores():
     team   = request.args.get('team')
-    # Chrome OFF 가드: 절전 모드면 캐시만 반환 (Selenium 호출 금지)
-    if not chrome.is_active():
-        today = get_game_date()
-        if _scores_cache and _scores_cache_date == today:
-            cached = _scores_cache
-            if team:
-                cached = [s for s in cached if team in s['away'] or team in s['home']]
-            return jsonify({
-                'scores': cached,
-                'updated': _fmt_ts(_scores_cache_time),
-                'cached_at': _iso_kst(_scores_cache_time),
-                'note': '캐시된 결과 (서버 절전 모드)',
-                'chrome_mode': chrome.mode(),
-            })
-        return jsonify(_empty_payload('scores'))
     scores = get_live_scores()
     if team:
         scores = [s for s in scores if team in s['away'] or team in s['home']]
@@ -1640,11 +1258,6 @@ def live_scores():
 def game_info():
     team  = request.args.get('team', '')
     today = get_game_date()
-
-    # Chrome OFF 가드: 캐시에 있는 게임 정보가 있으면 반환, 없으면 빈 응답
-    if not chrome.is_active():
-        # _gameinfo_cache는 game_id 기반이라 키 매칭이 까다로움 → 빈 응답으로 통일
-        return jsonify(_empty_payload('gameinfo'))
 
     game_ids = get_game_id(today)
     if not game_ids:
@@ -1685,17 +1298,6 @@ def game_info():
 
 @app.route('/api/ranking')
 def team_ranking():
-    # Chrome OFF 가드: 순위는 하루 단위로 천천히 변하므로 캐시 적극 재사용
-    if not chrome.is_active():
-        if _ranking_cache:
-            return jsonify({
-                'ranking': _ranking_cache,
-                'updated': _fmt_ts(_ranking_cache_time),
-                'cached_at': _iso_kst(_ranking_cache_time),
-                'note': '캐시된 결과 (서버 절전 모드)',
-                'chrome_mode': chrome.mode(),
-            })
-        return jsonify(_empty_payload('ranking'))
     ranking = get_team_ranking()
     return jsonify({'ranking': ranking, 'updated': _fmt_ts(_ranking_cache_time)})
 
@@ -1705,20 +1307,6 @@ def recent_games():
     team = request.args.get('team', '')
     if not team:
         return jsonify({'error': '팀명을 입력해주세요'}), 400
-    # Chrome OFF 가드: 팀별 캐시가 있으면 반환, 없으면 빈 응답
-    if not chrome.is_active():
-        if team in _recent_cache:
-            return jsonify({
-                'team': team,
-                'recent': _recent_cache[team],
-                'updated': _fmt_ts(_recent_cache_time.get(team, 0)),
-                'cached_at': _iso_kst(_recent_cache_time.get(team, 0)),
-                'note': '캐시된 결과 (서버 절전 모드)',
-                'chrome_mode': chrome.mode(),
-            })
-        payload = _empty_payload('recent')
-        payload['team'] = team
-        return jsonify(payload)
     recent = get_recent_games(team)
     return jsonify({
         'team': team,
@@ -1739,7 +1327,6 @@ def debug_scores():
 # (gunicorn/waitress 환경 포함. dev의 리로더는 use_reloader=False로 회피)
 # ─────────────────────────────────────────
 _start_background()
-_start_scheduler()  # CHROME_ALWAYS_ON=true면 내부에서 no-op
 
 
 if __name__ == '__main__':

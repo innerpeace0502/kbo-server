@@ -8,3 +8,4 @@ gunicorn
 Pillow
 selenium
 webdriver-manager
+schedule
