@@ -349,6 +349,32 @@ class _AlwaysOnChromeManager:
         return "always_on"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Chrome lifecycle 모드 선택
+#
+# 환경변수 CHROME_ALWAYS_ON으로 동작 모드를 전환한다.
+#   - "true"  (기본값, 이 커밋 시점): 기존 24시간 ON 동작. _AlwaysOnChromeManager 사용.
+#   - "false": 새로운 절전 모드. ChromeManager 사용 (실제 ON/OFF 분기).
+#
+# 이 커밋(커밋 3)에서는 chrome 인스턴스만 생성하고, 아직 어디서도 chrome.is_active()
+# 같은 메서드를 호출하지 않는다. 따라서 부팅 동작은 여전히 100% 기존과 동일하다.
+#
+# 향후 커밋에서 API 라우트와 _bg_refresh_loop에 chrome.is_active() 가드를 추가하면,
+# 그때 비로소 CHROME_ALWAYS_ON=false 모드의 효과가 발휘된다.
+#
+# 긴급 롤백: Railway Variables에서 CHROME_ALWAYS_ON=true 설정 → 즉시 기존 동작 복귀.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CHROME_ALWAYS_ON = os.environ.get('CHROME_ALWAYS_ON', 'true').lower() == 'true'
+
+if _CHROME_ALWAYS_ON:
+    chrome = _AlwaysOnChromeManager()
+    print(f"[boot] CHROME_ALWAYS_ON=true → 기존 24시간 ON 모드 (always_on dummy)")
+else:
+    chrome = ChromeManager()
+    print(f"[boot] CHROME_ALWAYS_ON=false → 절전 모드 (lifecycle managed)")
+
+
 def _fetch_body_text(url, wait_patterns=None, max_wait=12):
     """Selenium 페이지를 가져와 body 텍스트 반환. 드라이버 재사용 + 직렬화.
 
