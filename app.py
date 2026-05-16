@@ -11,6 +11,7 @@ import atexit
 import gzip
 import hashlib
 import random
+import schedule  # Chrome 절전 모드 스케줄러용 (매일 03:55 트리거)
 
 app = Flask(__name__, static_folder='static')
 CORS(app)
@@ -1102,6 +1103,172 @@ def _start_background():
     print("[prewarm] background thread started")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Chrome 절전 모드 스케줄러
+#
+# 매일 03:55에 morning_schedule_fetch()를 자동 실행하여 오늘 경기 일정을 받고
+# 첫 경기 -2h05m에 start_game_mode, +5m에 stop_game_mode를 예약한다.
+#
+# CHROME_ALWAYS_ON=true에서는 _start_scheduler()가 no-op (스케줄러 미기동).
+# TEST_MODE=true에서는 트리거 시각을 가까운 미래로 재배치하여 5분 안에 전 사이클 시연.
+#
+# 시간대 처리: schedule 라이브러리는 시스템 로컬 시간을 사용한다.
+# Railway 배포 시 환경변수 TZ=Asia/Seoul 설정 필수 (그러면 컨테이너 시계가 KST가 되어
+# schedule.every().day.at("03:55")가 KST 03:55에 발사).
+#
+# 이 커밋(커밋 4)에서는 함수들과 _start_scheduler() 호출까지 추가되지만,
+# 기본값 CHROME_ALWAYS_ON=true 상태에서는 스케줄러가 기동되지 않아 부팅 동작 100% 동일.
+# 절전 모드(false)로 띄우려면 환경변수를 명시적으로 설정해야 한다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_scheduler_started = False
+_scheduler_started_lock = threading.Lock()
+
+
+def _is_test_mode():
+    """TEST_MODE=true이면 트리거 시각을 가까운 미래로 재배치 (로컬 5분 시연용)."""
+    return os.environ.get('TEST_MODE', 'false').lower() == 'true'
+
+
+def _parse_first_game_time(games, date_str):
+    """일정에서 가장 빠른 경기 시작 시각(datetime, KST). 없으면 None."""
+    if not games:
+        return None
+    year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
+    earliest = None
+    for g in games:
+        t = (g.get('time') or '').strip()
+        if not re.match(r'^\d{1,2}:\d{2}$', t):
+            continue
+        hh, mm = map(int, t.split(':'))
+        dt = datetime(year, month, day, hh, mm, tzinfo=KST)
+        if earliest is None or dt < earliest:
+            earliest = dt
+    return earliest
+
+
+def _estimate_last_game_end(games, date_str):
+    """일정에서 가장 늦은 경기 시작 시각 + 4시간(평균 경기 길이). 없으면 None."""
+    if not games:
+        return None
+    year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
+    latest = None
+    for g in games:
+        t = (g.get('time') or '').strip()
+        if not re.match(r'^\d{1,2}:\d{2}$', t):
+            continue
+        hh, mm = map(int, t.split(':'))
+        dt = datetime(year, month, day, hh, mm, tzinfo=KST)
+        if latest is None or dt > latest:
+            latest = dt
+    return latest + timedelta(hours=4) if latest else None
+
+
+def morning_schedule_fetch():
+    """매일 03:55 트리거. 오늘 일정 받고 게임 모드 예약 후 Chrome OFF.
+    휴식일(경기 없음)은 즉시 OFF하고 다음 날 03:55까지 대기."""
+    try:
+        today = get_game_date()
+        chrome.start("morning_schedule_fetch")
+        # 일정은 _get_schedule_rows()로 받지만 Selenium 사용 안 함 (일반 HTTP)
+        games = get_kbo_schedule(today)
+        if not games:
+            print(f"[scheduler] {today} 경기 없음 - 휴식일, 다음 03:55까지 대기")
+        else:
+            first_start = _parse_first_game_time(games, today)
+            last_end = _estimate_last_game_end(games, today)
+            if first_start and last_end:
+                _schedule_game_mode(first_start, last_end)
+                start_at = (first_start - timedelta(hours=2, minutes=5)).strftime('%H:%M')
+                stop_at = (last_end + timedelta(minutes=5)).strftime('%H:%M')
+                print(f"[scheduler] 게임 모드 예약: ON {start_at} (첫경기 -2h05m) / OFF {stop_at} (마지막 +5m)")
+            else:
+                print(f"[scheduler] {today} 경기 시각 파싱 실패 - 게임 모드 예약 생략")
+    except Exception as e:
+        print(f"[scheduler] morning_schedule_fetch 오류: {e}")
+    finally:
+        chrome.stop("morning_schedule_fetch_done")
+
+
+def start_game_mode():
+    """첫 경기 -2h05m 트리거. Chrome ON 마킹. _bg_refresh_loop가 활성화됨."""
+    chrome.start("game_mode")
+    print(f"[scheduler] 게임 모드 시작 - 실시간 스크래핑 ON")
+    return schedule.CancelJob  # 일회성 (다음 날 morning_schedule_fetch가 재예약)
+
+
+def stop_game_mode():
+    """마지막 경기 +5m 또는 종료 감지 후 트리거. Chrome OFF + 다음 날 준비."""
+    chrome.stop("game_mode_end")
+    print(f"[scheduler] 게임 모드 종료 - Chrome OFF")
+    _reschedule_next_morning()
+    return schedule.CancelJob
+
+
+def _schedule_game_mode(first_game_kst, last_game_kst):
+    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반)."""
+    start_at = (first_game_kst - timedelta(hours=2, minutes=5)).strftime('%H:%M')
+    stop_at = (last_game_kst + timedelta(minutes=5)).strftime('%H:%M')
+    schedule.clear('game_start_once')
+    schedule.clear('game_stop_once')
+    schedule.every().day.at(start_at).do(start_game_mode).tag('game_start_once')
+    schedule.every().day.at(stop_at).do(stop_game_mode).tag('game_stop_once')
+
+
+def _reschedule_next_morning():
+    """일회성 game_* 태그를 정리. 다음 날 03:55 morning_schedule_fetch는
+    영구 등록되어 있어 자동으로 재발사된다."""
+    schedule.clear('game_start_once')
+    schedule.clear('game_stop_once')
+
+
+def _scheduler_loop():
+    """schedule.run_pending()을 주기적으로 호출하는 워커 스레드.
+    TEST_MODE면 1초마다, 평상시 20초마다 체크."""
+    time_module.sleep(2)
+    while True:
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            print(f"[scheduler loop 오류] {e}")
+        time_module.sleep(1 if _is_test_mode() else 20)
+
+
+def _start_scheduler():
+    """스케줄러 기동. CHROME_ALWAYS_ON=true면 no-op.
+    WBB_DISABLE_PREWARM은 prewarm 전용 플래그라 여기서는 무시 (스케줄러는 별개)."""
+    global _scheduler_started
+    if _CHROME_ALWAYS_ON:
+        print("[scheduler] CHROME_ALWAYS_ON=true → 스케줄러 비활성 (기존 동작 유지)")
+        return
+    if os.environ.get('WBB_DISABLE_SCHEDULER') == '1':
+        # 스케줄러 전용 비활성화 (운영 비상시 토글용, 기본은 활성)
+        print("[scheduler] WBB_DISABLE_SCHEDULER=1 → 스케줄러 비활성")
+        return
+    with _scheduler_started_lock:
+        if _scheduler_started:
+            return
+        _scheduler_started = True
+
+    if _is_test_mode():
+        # 테스트: 가까운 미래로 트리거 시각 재배치 (시계 자체를 건드리지 않음)
+        now = datetime.now(KST)
+        t1 = (now + timedelta(minutes=1)).strftime('%H:%M')
+        t2 = (now + timedelta(minutes=2)).strftime('%H:%M')
+        t3 = (now + timedelta(minutes=5)).strftime('%H:%M')
+        schedule.every().day.at(t1).do(morning_schedule_fetch).tag('test')
+        schedule.every().day.at(t2).do(start_game_mode).tag('test')
+        schedule.every().day.at(t3).do(stop_game_mode).tag('test')
+        print(f"[TEST_MODE] schedule_fetch={t1} game_start={t2} game_stop={t3}")
+    else:
+        schedule.every().day.at("03:55").do(morning_schedule_fetch).tag('morning')
+        print(f"[scheduler] 매일 03:55에 morning_schedule_fetch 예약 (시스템 로컬 시간 기준 - Railway는 TZ=Asia/Seoul 필요)")
+
+    t = threading.Thread(target=_scheduler_loop, daemon=True, name='kbo-scheduler')
+    t.start()
+    print("[scheduler] background thread started")
+
+
 # ─────────────────────────────────────────
 # Flask 응답 가속 (Gzip + ETag/304)
 # ─────────────────────────────────────────
@@ -1432,6 +1599,7 @@ def debug_scores():
 # (gunicorn/waitress 환경 포함. dev의 리로더는 use_reloader=False로 회피)
 # ─────────────────────────────────────────
 _start_background()
+_start_scheduler()  # CHROME_ALWAYS_ON=true면 내부에서 no-op
 
 
 if __name__ == '__main__':
