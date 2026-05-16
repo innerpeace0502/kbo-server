@@ -366,7 +366,7 @@ class _AlwaysOnChromeManager:
 # 긴급 롤백: Railway Variables에서 CHROME_ALWAYS_ON=true 설정 → 즉시 기존 동작 복귀.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CHROME_ALWAYS_ON = os.environ.get('CHROME_ALWAYS_ON', 'true').lower() == 'true'
+_CHROME_ALWAYS_ON = os.environ.get('CHROME_ALWAYS_ON', 'false').lower() == 'true'
 
 if _CHROME_ALWAYS_ON:
     chrome = _AlwaysOnChromeManager()
