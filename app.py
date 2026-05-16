@@ -1373,6 +1373,55 @@ def get_logo(team):
     return resp
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Chrome 절전 모드용 응답 헬퍼
+#
+# Chrome OFF 상태에서 API 호출이 오면:
+#   1) 캐시가 있으면 캐시 + cached_at(언제 캐시되었는지) 반환
+#   2) 캐시도 없으면 빈 결과 + 200 OK 반환 (안드로이드 앱 크래시 방지)
+#
+# 기존 응답 키(scores, ranking, updated 등)는 유지하고
+# 새 키(cached_at, note, chrome_mode)만 추가하여 하위 호환성 확보.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _iso_kst(ts):
+    """Unix 타임스탬프를 ISO 8601 KST 문자열로. None/0이면 None."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromtimestamp(ts, KST).isoformat()
+    except Exception:
+        return None
+
+
+def _empty_payload(kind):
+    """Chrome OFF + 캐시 없음 상태의 표준 빈 응답.
+    안드로이드 앱 호환을 위해 기존 응답의 모든 키를 빈 값으로 채워서 반환."""
+    base = {
+        'cached_at': None,
+        'note': '서버 절전 모드 - 경기 시간대에 다시 시도해주세요',
+        'chrome_mode': chrome.mode(),
+        'updated': '',
+    }
+    if kind == 'scores':
+        base['scores'] = []
+    elif kind == 'ranking':
+        base['ranking'] = []
+    elif kind == 'recent':
+        base['recent'] = []
+        base['team'] = ''
+    elif kind == 'gameinfo':
+        base.update({
+            'game_id': '', 'away': '', 'home': '',
+            'status': 'off',
+            'away_score': '', 'home_score': '',
+            'away_pitchers': [], 'home_pitchers': [],
+        })
+    elif kind == 'pitcher':
+        base['pitchers'] = []
+    return base
+
+
 def _attach_pitcher_info(date_str, games):
     """게임 목록에 선발투수 정보 추가 (캐시 적용, 경기 시작 후 스킵)"""
     global _pitcher_cache, _pitcher_cache_time
@@ -1467,6 +1516,9 @@ def today_schedule():
 @app.route('/api/pitcher/today')
 def pitcher_today():
     """선발투수 전용 API — 무거운 Selenium 호출을 schedule API와 분리"""
+    # Chrome OFF 가드: 투수 정보는 Selenium 호출이 필요해서 캐시 없으면 빈 응답
+    if not chrome.is_active():
+        return jsonify(_empty_payload('pitcher'))
     team      = request.args.get('team')
     today_str = get_game_date()
     today     = datetime.strptime(today_str, '%Y%m%d')
@@ -1520,6 +1572,21 @@ def channel():
 @app.route('/api/scores')
 def live_scores():
     team   = request.args.get('team')
+    # Chrome OFF 가드: 절전 모드면 캐시만 반환 (Selenium 호출 금지)
+    if not chrome.is_active():
+        today = get_game_date()
+        if _scores_cache and _scores_cache_date == today:
+            cached = _scores_cache
+            if team:
+                cached = [s for s in cached if team in s['away'] or team in s['home']]
+            return jsonify({
+                'scores': cached,
+                'updated': _fmt_ts(_scores_cache_time),
+                'cached_at': _iso_kst(_scores_cache_time),
+                'note': '캐시된 결과 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        return jsonify(_empty_payload('scores'))
     scores = get_live_scores()
     if team:
         scores = [s for s in scores if team in s['away'] or team in s['home']]
@@ -1530,6 +1597,11 @@ def live_scores():
 def game_info():
     team  = request.args.get('team', '')
     today = get_game_date()
+
+    # Chrome OFF 가드: 캐시에 있는 게임 정보가 있으면 반환, 없으면 빈 응답
+    if not chrome.is_active():
+        # _gameinfo_cache는 game_id 기반이라 키 매칭이 까다로움 → 빈 응답으로 통일
+        return jsonify(_empty_payload('gameinfo'))
 
     game_ids = get_game_id(today)
     if not game_ids:
@@ -1570,6 +1642,17 @@ def game_info():
 
 @app.route('/api/ranking')
 def team_ranking():
+    # Chrome OFF 가드: 순위는 하루 단위로 천천히 변하므로 캐시 적극 재사용
+    if not chrome.is_active():
+        if _ranking_cache:
+            return jsonify({
+                'ranking': _ranking_cache,
+                'updated': _fmt_ts(_ranking_cache_time),
+                'cached_at': _iso_kst(_ranking_cache_time),
+                'note': '캐시된 결과 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        return jsonify(_empty_payload('ranking'))
     ranking = get_team_ranking()
     return jsonify({'ranking': ranking, 'updated': _fmt_ts(_ranking_cache_time)})
 
@@ -1579,6 +1662,20 @@ def recent_games():
     team = request.args.get('team', '')
     if not team:
         return jsonify({'error': '팀명을 입력해주세요'}), 400
+    # Chrome OFF 가드: 팀별 캐시가 있으면 반환, 없으면 빈 응답
+    if not chrome.is_active():
+        if team in _recent_cache:
+            return jsonify({
+                'team': team,
+                'recent': _recent_cache[team],
+                'updated': _fmt_ts(_recent_cache_time.get(team, 0)),
+                'cached_at': _iso_kst(_recent_cache_time.get(team, 0)),
+                'note': '캐시된 결과 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        payload = _empty_payload('recent')
+        payload['team'] = team
+        return jsonify(payload)
     recent = get_recent_games(team)
     return jsonify({
         'team': team,
