@@ -99,6 +99,52 @@ def _load_scores_persist():
     return []
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 디스크 캐시 헬퍼 (절전 모드에서 stale-but-useful 데이터 제공)
+#
+# 절전 모드(Chrome OFF) + 메모리 캐시 비어있을 때 사용.
+# ranking(팀 순위), recent(팀별 최근 10경기)는 하루 단위로만 변하므로
+# 어제 데이터라도 충분히 유용. /tmp 파일에 saved_at 타임스탬프와 함께 저장.
+#
+# 컨테이너 lifetime(Railway 기준 보통 1주 이상) 동안 /tmp가 유지되므로
+# 재배포해도 데이터가 살아남는다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DISK_CACHE_DIR = '/tmp'
+
+
+def _disk_cache_path(name):
+    return os.path.join(_DISK_CACHE_DIR, f'kbo_{name}_cache.json')
+
+
+def _save_disk_cache(name, data):
+    """data를 /tmp/kbo_{name}_cache.json에 저장 (timestamp 포함). 예외 무시."""
+    try:
+        payload = {'saved_at': time_module.time(), 'data': data}
+        with open(_disk_cache_path(name), 'w', encoding='utf-8') as f:
+            json_module.dump(payload, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[disk_cache 저장 오류 {name}] {e}")
+
+
+def _load_disk_cache(name, max_age_sec=86400):
+    """파일에서 캐시 복원. max_age_sec(기본 24시간) 이내면 (data, saved_at_ts) 반환,
+    아니면 (None, None). 절전 모드 fallback용."""
+    try:
+        path = _disk_cache_path(name)
+        if not os.path.exists(path):
+            return None, None
+        with open(path, 'r', encoding='utf-8') as f:
+            payload = json_module.load(f)
+        saved_at = payload.get('saved_at', 0)
+        if time_module.time() - saved_at > max_age_sec:
+            return None, None
+        return payload.get('data'), saved_at
+    except Exception as e:
+        print(f"[disk_cache 로드 오류 {name}] {e}")
+        return None, None
+
+
 # ─────────────────────────────────────────
 # 채널 정보 (원본 그대로)
 # ─────────────────────────────────────────
@@ -1098,13 +1144,17 @@ def _warm_caches_once():
                 print(f"[prewarm gameinfo 오류] {e}")
 
         try:
-            get_team_ranking(force=True)
+            ranking_data = get_team_ranking(force=True)
+            if ranking_data:
+                _save_disk_cache('ranking', ranking_data)  # 절전 모드 fallback용
         except Exception as e:
             print(f"[prewarm ranking 오류] {e}")
 
         for team in KBO_TEAMS:
             try:
-                get_recent_games(team, force=True)
+                recent_data = get_recent_games(team, force=True)
+                if recent_data:
+                    _save_disk_cache(f'recent_{team}', recent_data)  # 팀별 디스크 저장
             except Exception as e:
                 print(f"[prewarm recent {team} 오류] {e}")
     except Exception as e:
@@ -1530,6 +1580,29 @@ def _attach_pitcher_info(date_str, games):
     return games
 
 
+def _is_all_games_started_long_ago(games, base_date, hours_after_start=4):
+    """일정의 모든 경기가 'base_date 시각 + hours_after_start' 이전에 시작되었는지.
+    True면 모든 경기가 이미 끝났다고 추정 가능."""
+    if not games:
+        return False
+    try:
+        now_kst = datetime.now(KST)
+        latest_start = None
+        for g in games:
+            t = (g.get('time') or '').strip()
+            if not re.match(r'^\d{1,2}:\d{2}$', t):
+                continue
+            hh, mm = map(int, t.split(':'))
+            dt = datetime(base_date.year, base_date.month, base_date.day, hh, mm, tzinfo=KST)
+            if latest_start is None or dt > latest_start:
+                latest_start = dt
+        if latest_start and now_kst > latest_start + timedelta(hours=hours_after_start):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 @app.route('/api/schedule/today')
 def today_schedule():
     team      = request.args.get('team')
@@ -1539,18 +1612,28 @@ def today_schedule():
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
 
-    # ✅ 오늘 경기가 없으면 내일 경기 조회
-    if not games:
-        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
-        tomorrow     = today + timedelta(days=1)
-        games        = get_kbo_schedule(tomorrow_str)
-        if team:
-            games = [g for g in games if team in g['away'] or team in g['home']]
+    # ✅ 오늘 경기가 모두 종료(추정)되었거나 아예 없으면 다음 경기 찾기 (최대 7일)
+    if not games or _is_all_games_started_long_ago(games, today):
+        for delta in range(1, 8):
+            next_date = today + timedelta(days=delta)
+            next_str = next_date.strftime('%Y%m%d')
+            next_games = get_kbo_schedule(next_str)
+            if team:
+                next_games = [g for g in next_games if team in g['away'] or team in g['home']]
+            if next_games:
+                return jsonify({
+                    '날짜': next_date.strftime('%Y-%m-%d'),
+                    '경기목록': next_games,
+                    '경기수': len(next_games),
+                    '내일경기': delta == 1,
+                    '다음경기': delta > 1,
+                })
+        # 7일 안에 경기 없으면 빈 응답
         return jsonify({
-            '날짜': tomorrow.strftime('%Y-%m-%d'),
-            '경기목록': games,
-            '경기수': len(games),
-            '내일경기': True
+            '날짜': today.strftime('%Y-%m-%d'),
+            '경기목록': [],
+            '경기수': 0,
+            'note': '향후 7일간 예정 경기 없음'
         })
 
     return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
@@ -1687,12 +1770,23 @@ def game_info():
 def team_ranking():
     # Chrome OFF 가드: 순위는 하루 단위로 천천히 변하므로 캐시 적극 재사용
     if not chrome.is_active():
+        # 1순위: 메모리 캐시
         if _ranking_cache:
             return jsonify({
                 'ranking': _ranking_cache,
                 'updated': _fmt_ts(_ranking_cache_time),
                 'cached_at': _iso_kst(_ranking_cache_time),
                 'note': '캐시된 결과 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        # 2순위: 디스크 캐시 (24시간 이내, 컨테이너 재시작 후에도 살아남음)
+        disk_data, disk_ts = _load_disk_cache('ranking')
+        if disk_data:
+            return jsonify({
+                'ranking': disk_data,
+                'updated': _fmt_ts(disk_ts),
+                'cached_at': _iso_kst(disk_ts),
+                'note': '디스크 캐시 (서버 절전 모드, 어제 기준)',
                 'chrome_mode': chrome.mode(),
             })
         return jsonify(_empty_payload('ranking'))
@@ -1705,8 +1799,9 @@ def recent_games():
     team = request.args.get('team', '')
     if not team:
         return jsonify({'error': '팀명을 입력해주세요'}), 400
-    # Chrome OFF 가드: 팀별 캐시가 있으면 반환, 없으면 빈 응답
+    # Chrome OFF 가드: 팀별 캐시가 있으면 반환, 없으면 디스크 fallback, 그래도 없으면 빈 응답
     if not chrome.is_active():
+        # 1순위: 메모리 캐시
         if team in _recent_cache:
             return jsonify({
                 'team': team,
@@ -1714,6 +1809,17 @@ def recent_games():
                 'updated': _fmt_ts(_recent_cache_time.get(team, 0)),
                 'cached_at': _iso_kst(_recent_cache_time.get(team, 0)),
                 'note': '캐시된 결과 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        # 2순위: 디스크 캐시
+        disk_data, disk_ts = _load_disk_cache(f'recent_{team}')
+        if disk_data:
+            return jsonify({
+                'team': team,
+                'recent': disk_data,
+                'updated': _fmt_ts(disk_ts),
+                'cached_at': _iso_kst(disk_ts),
+                'note': '디스크 캐시 (서버 절전 모드, 어제 기준)',
                 'chrome_mode': chrome.mode(),
             })
         payload = _empty_payload('recent')
