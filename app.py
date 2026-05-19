@@ -1111,8 +1111,8 @@ def _schedule_early_stop(minutes=5):
             if 'game_stop_once' in j.tags:
                 return
         target = datetime.now(KST) + timedelta(minutes=minutes)
-        schedule.every().day.at(target.strftime('%H:%M')).do(stop_game_mode).tag('game_stop_once')
-        print(f"[scheduler] 모든 경기 종료 감지 - {minutes}분 후 ({target.strftime('%H:%M')}) Chrome OFF 예약")
+        schedule.every().day.at(target.strftime('%H:%M'), "Asia/Seoul").do(stop_game_mode).tag('game_stop_once')
+        print(f"[scheduler] 모든 경기 종료 감지 - {minutes}분 후 ({target.strftime('%H:%M')} KST) Chrome OFF 예약")
     except Exception as e:
         print(f"[scheduler] _schedule_early_stop 오류: {e}")
 
@@ -1299,13 +1299,14 @@ def stop_game_mode():
 
 
 def _schedule_game_mode(first_game_kst, last_game_kst):
-    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반)."""
+    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반, KST 기준)."""
     start_at = (first_game_kst - timedelta(hours=2, minutes=5)).strftime('%H:%M')
     stop_at = (last_game_kst + timedelta(minutes=5)).strftime('%H:%M')
     schedule.clear('game_start_once')
     schedule.clear('game_stop_once')
-    schedule.every().day.at(start_at).do(start_game_mode).tag('game_start_once')
-    schedule.every().day.at(stop_at).do(stop_game_mode).tag('game_stop_once')
+    # ✅ "Asia/Seoul" 인자로 KST 명시 (시스템 로컬 시간이 UTC여도 KST 기준 동작)
+    schedule.every().day.at(start_at, "Asia/Seoul").do(start_game_mode).tag('game_start_once')
+    schedule.every().day.at(stop_at, "Asia/Seoul").do(stop_game_mode).tag('game_stop_once')
 
 
 def _reschedule_next_morning():
@@ -1343,19 +1344,31 @@ def _start_scheduler():
             return
         _scheduler_started = True
 
+    # ✅ schedule.every().day.at(..., "Asia/Seoul")로 KST 명시
+    #    시스템 로컬 시간(보통 UTC)이 아닌 KST 기준으로 트리거 발사 보장
     if _is_test_mode():
         # 테스트: 가까운 미래로 트리거 시각 재배치 (시계 자체를 건드리지 않음)
         now = datetime.now(KST)
         t1 = (now + timedelta(minutes=1)).strftime('%H:%M')
         t2 = (now + timedelta(minutes=2)).strftime('%H:%M')
         t3 = (now + timedelta(minutes=5)).strftime('%H:%M')
-        schedule.every().day.at(t1).do(morning_schedule_fetch).tag('test')
-        schedule.every().day.at(t2).do(start_game_mode).tag('test')
-        schedule.every().day.at(t3).do(stop_game_mode).tag('test')
-        print(f"[TEST_MODE] schedule_fetch={t1} game_start={t2} game_stop={t3}")
+        schedule.every().day.at(t1, "Asia/Seoul").do(morning_schedule_fetch).tag('test')
+        schedule.every().day.at(t2, "Asia/Seoul").do(start_game_mode).tag('test')
+        schedule.every().day.at(t3, "Asia/Seoul").do(stop_game_mode).tag('test')
+        print(f"[TEST_MODE] schedule_fetch={t1} game_start={t2} game_stop={t3} (KST 기준)")
     else:
-        schedule.every().day.at("03:55").do(morning_schedule_fetch).tag('morning')
-        print(f"[scheduler] 매일 03:55에 morning_schedule_fetch 예약 (시스템 로컬 시간 기준 - Railway는 TZ=Asia/Seoul 필요)")
+        schedule.every().day.at("03:55", "Asia/Seoul").do(morning_schedule_fetch).tag('morning')
+        print(f"[scheduler] 매일 03:55 KST에 morning_schedule_fetch 예약 (시간대 명시: Asia/Seoul)")
+
+    # 부팅 시점 시간대 진단 정보 출력
+    import time as _t
+    sys_tz = _t.tzname
+    sys_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    kst_now = datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[scheduler diag] system tzname={sys_tz}, system_now={sys_now}, kst_now={kst_now}")
+    print(f"[scheduler diag] registered jobs: {len(schedule.jobs)}")
+    for j in schedule.jobs:
+        print(f"  - tags={j.tags}, next_run={j.next_run}")
 
     t = threading.Thread(target=_scheduler_loop, daemon=True, name='kbo-scheduler')
     t.start()
@@ -1838,6 +1851,36 @@ def debug_scores():
     """스코어 디버그용 - 캐시 무시하고 새로 조회"""
     scores = get_live_scores(force=True)
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
+
+
+@app.route('/api/debug/scheduler')
+def debug_scheduler():
+    """스케줄러 진단 - 시스템 TZ, 현재 시각, 등록된 jobs 목록을 반환.
+    schedule.every().day.at()이 의도한 시각에 발사되는지 확인용."""
+    import time as _t
+    sys_now = datetime.now()  # naive — 시스템 로컬 시간
+    kst_now = datetime.now(KST)
+    jobs_info = []
+    for j in schedule.jobs:
+        jobs_info.append({
+            'tags': list(j.tags),
+            'next_run': str(j.next_run) if j.next_run else None,
+            'at_time': str(j.at_time) if hasattr(j, 'at_time') and j.at_time else None,
+            'interval': j.interval,
+            'unit': j.unit,
+        })
+    return jsonify({
+        'chrome_mode': chrome.mode(),
+        'chrome_active': chrome.is_active(),
+        'scheduler_started': _scheduler_started,
+        'CHROME_ALWAYS_ON': _CHROME_ALWAYS_ON,
+        'system_tzname': list(_t.tzname),
+        'system_now_naive': sys_now.strftime('%Y-%m-%d %H:%M:%S'),
+        'kst_now': kst_now.strftime('%Y-%m-%d %H:%M:%S'),
+        'tz_offset_hours': (sys_now - kst_now.replace(tzinfo=None)).total_seconds() / 3600,
+        'jobs_count': len(schedule.jobs),
+        'jobs': jobs_info,
+    })
 
 
 # ─────────────────────────────────────────
