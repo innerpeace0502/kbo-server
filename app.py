@@ -704,6 +704,18 @@ def get_live_scores(force=False):
                     i += 6
                     continue
 
+                # ✅ 우천취소/경기취소: status_line이 "경기취소". 6줄 블록 구조
+                # (구장 / 방송사 / 경기취소 / 선OO / VS / 선OO) - 경기예정과 동일
+                elif '경기취소' in status_line or '취소' in status_line:
+                    if teams:
+                        scores.append({
+                            'away': teams[0], 'home': teams[1],
+                            'away_score': '', 'home_score': '',
+                            'status': '3', 'inning': '경기취소'
+                        })
+                    i += 6
+                    continue
+
                 elif '경기종료' in status_line:
                     vs_idx = None
                     for k in range(i+3, min(i+12, len(lines))):
@@ -846,14 +858,16 @@ def get_pitcher_from_gamecenter(today, game_id, force=False):
 
             status_line = lines[i + 2]
 
-            if '경기예정' in status_line:
+            # 경기예정 + 우천취소(경기취소) 모두 동일 구조: i+3=어웨이선발 / i+4=VS / i+5=홈선발
+            if '경기예정' in status_line or '경기취소' in status_line or '취소' in status_line:
                 if i + 5 < len(lines):
                     away_raw = lines[i + 3]
                     vs_check = lines[i + 4]
                     home_raw = lines[i + 5]
                     if 'VS' in vs_check.upper():
+                        is_cancelled = '취소' in status_line
                         result = {
-                            'status': 'pre',
+                            'status': 'cancelled' if is_cancelled else 'pre',
                             'away_pitchers': [{'label': '선발', 'name': re.sub(r'^선', '', away_raw).strip()}],
                             'home_pitchers': [{'label': '선발', 'name': re.sub(r'^선', '', home_raw).strip()}],
                         }
@@ -954,32 +968,26 @@ def get_team_ranking(force=False):
             return _ranking_cache
 
         lines = [l.strip() for l in body.split('\n') if l.strip()]
-        teams_order = []
-        stats_list  = []
-
-        for line in lines:
-            m = re.match(r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)$', line)
-            if m:
-                teams_order.append({'rank': m.group(1), 'team': m.group(2)})
-            s = re.match(r'^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([-\d.]+)\s+(.+)$', line)
-            if s:
-                stats_list.append({
-                    'games': s.group(1), 'win':    s.group(2),
-                    'lose':  s.group(3), 'draw':   s.group(4),
-                    'pct':   s.group(5), 'gb':     s.group(6),
-                    'streak':s.group(7)
-                })
-
         ranking = []
-        for i, t in enumerate(teams_order):
-            stat = stats_list[i] if i < len(stats_list) else {}
-            ranking.append({
-                'rank': t['rank'], 'team': t['team'],
-                'games': stat.get('games',''), 'win':  stat.get('win',''),
-                'lose':  stat.get('lose',''),  'draw': stat.get('draw',''),
-                'pct':   stat.get('pct',''),   'gb':   stat.get('gb',''),
-                'streak':stat.get('streak','')
-            })
+
+        # ✅ KBO 순위 페이지가 한 줄 통합 형식으로 변경됨 (2026-05 확인):
+        #   "1 삼성 43 25 17 1 0.595 - 1승"
+        #   = 순위 팀명 경기 승 패 무 승률 게임차 연속
+        # 게임차는 "-" 또는 "0.5"/"3" 등이므로 \S+ 로 매칭, 연속은 .+ 로.
+        row_re = re.compile(
+            r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)'
+            r'\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(.+)$'
+        )
+        for line in lines:
+            m = row_re.match(line)
+            if m:
+                ranking.append({
+                    'rank':  m.group(1), 'team':   m.group(2),
+                    'games': m.group(3), 'win':    m.group(4),
+                    'lose':  m.group(5), 'draw':   m.group(6),
+                    'pct':   m.group(7), 'gb':     m.group(8),
+                    'streak':m.group(9),
+                })
 
         if ranking:
             _ranking_cache = ranking
@@ -1569,7 +1577,8 @@ def _attach_pitcher_info(date_str, games):
             game_id = game_ids.get(away)
             if game_id:
                 info = get_pitcher_from_gamecenter(date_str, game_id)
-                if info and info.get('status') == 'pre':
+                # 경기예정(pre) + 우천취소(cancelled) 모두 선발투수 표시
+                if info and info.get('status') in ('pre', 'cancelled'):
                     pa = info.get('away_pitchers', [])
                     ph = info.get('home_pitchers', [])
                     ap = pa[0]['name'] if pa else ''
