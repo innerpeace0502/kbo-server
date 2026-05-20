@@ -1883,6 +1883,36 @@ def debug_scheduler():
     })
 
 
+@app.route('/api/debug/raw')
+def debug_raw():
+    """진단용: KBO 페이지 raw 라인 덤프 (우천취소 등 파싱 디버깅).
+    kind=gamecenter (기본): GameCenter 페이지 / kind=ranking: 팀순위 페이지.
+    Selenium으로 받은 body 텍스트를 줄 단위로 그대로 반환하여
+    실제 텍스트 구조와 파싱 로직 불일치를 진단한다."""
+    kind = request.args.get('kind', 'gamecenter')
+    today = get_game_date()
+    if kind == 'ranking':
+        body = _fetch_body_text(
+            'https://m.koreabaseball.com/Kbo/TeamRank.aspx',
+            wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
+        )
+        lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
+        return jsonify({
+            'kind': 'ranking', 'today': today,
+            'body_is_none': body is None,
+            'line_count': len(lines), 'lines': lines,
+        })
+    # gamecenter (기본)
+    url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+    body = _fetch_body_text(url, wait_patterns=[r'경기예정', r'경기종료', r'\d+회[초말]'])
+    lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
+    return jsonify({
+        'kind': 'gamecenter', 'today': today,
+        'body_is_none': body is None,
+        'line_count': len(lines), 'lines': lines,
+    })
+
+
 # ─────────────────────────────────────────
 # 모듈 로드 시점에 프리워밍 스레드 기동
 # (gunicorn/waitress 환경 포함. dev의 리로더는 use_reloader=False로 회피)
