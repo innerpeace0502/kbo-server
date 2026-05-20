@@ -200,7 +200,7 @@ TEAM_CODE = {
     '삼성': 'SS', '한화': 'HH', '키움': 'WO'
 }
 
-STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주']
+STADIUMS = ['잠실', '문학', '광주', '고척', '대전', '수원', '사직', '창원', '대구', '인천', '청주', '포항', '울산']
 
 
 # ─────────────────────────────────────────
@@ -521,7 +521,7 @@ def get_kbo_schedule(date_str):
         result = _get_schedule_rows(date_str)
         games = []
         current_date = ""
-        STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주']
+        STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주','포항','울산']
         for row_obj in result.get('rows', []):
             row = row_obj.get('row', [])
             if not row:
@@ -571,7 +571,7 @@ def _get_today_stadium_map(today):
         month = today[4:6]
         target_date = f"{month}.{today[6:8]}"
         current_date = ''
-        STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주']
+        STAD_LIST = ['잠실','수원','창원','대구','광주','인천','문학','대전','사직','고척','청주','포항','울산']
         for row_obj in result.get('rows', []):
             row = row_obj.get('row', [])
             for cell in row:
