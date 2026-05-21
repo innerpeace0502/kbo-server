@@ -1092,17 +1092,26 @@ def get_recent_games(team, force=False):
 # 백그라운드 프리워밍 (위젯 자동갱신 체감 속도의 핵심)
 # ─────────────────────────────────────────
 
-def _all_games_ended(scores):
-    """모든 경기가 종료/취소되었는지 판정.
-    status='2'(경기종료) 또는 inning에 '종료'/'취소'/'우천' 포함이면 끝난 경기로 본다.
-    빈 리스트면 False (경기 없음은 별도 처리).
+def _games_fully_settled(scores, today):
+    """오늘 일정의 모든 경기가 종료(2)/취소(3)로 확정됐는지 판정.
+    - 빈 리스트면 False.
+    - 파싱된 경기 수가 일정상 경기 수보다 적으면(누락) False.
+      → 늦게 끝나는 경기가 파싱에서 잠깐 빠져도 '전부 종료'로 오판하지 않도록 보호.
+    - 하나라도 진행중/예정이면 False.
+    이 판정이 True여야만 Chrome OFF를 예약/실행한다 (최종 점수 유실 방지의 핵심).
     """
     if not scores:
         return False
+    try:
+        expected = len(get_kbo_schedule(today))
+    except Exception:
+        expected = 0
+    if expected and len(scores) < expected:
+        return False  # 일정보다 적게 파싱됨 = 누락 경기 있음 (아직 진행중일 수 있음)
     for s in scores:
         status = (s.get('status') or '').strip()
         inning = (s.get('inning') or '').strip()
-        if status == '2':
+        if status in ('2', '3'):
             continue
         if '종료' in inning or '취소' in inning or '우천' in inning:
             continue
@@ -1131,8 +1140,8 @@ def _warm_caches_once():
         scores = get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
 
         # ✅ 경기 종료 자동 감지 (CHROME_ALWAYS_ON=false 모드에서만 의미 있음)
-        # CHROME_ALWAYS_ON=true 모드에서도 동작은 하지만 stop_game_mode가 no-op라 영향 없음
-        if not _CHROME_ALWAYS_ON and scores and _all_games_ended(scores):
+        # 일정상 모든 경기가 종료/취소로 확정됐을 때만 OFF 예약 (누락 경기 있으면 보류)
+        if not _CHROME_ALWAYS_ON and _games_fully_settled(scores, today):
             _schedule_early_stop(minutes=5)
 
         try:
@@ -1249,7 +1258,9 @@ def _parse_first_game_time(games, date_str):
 
 
 def _estimate_last_game_end(games, date_str):
-    """일정에서 가장 늦은 경기 시작 시각 + 4시간(평균 경기 길이). 없으면 None."""
+    """일정에서 가장 늦은 경기 시작 시각 + 5시간 30분. 없으면 None.
+    (4시간은 짧아 연장·고득점 경기 진행 중 Chrome이 꺼지는 문제가 있었음.
+     이 값은 OFF '안전망' 시각일 뿐, 실제 OFF는 stop_game_mode가 미종료 경기를 재확인해 결정.)"""
     if not games:
         return None
     year, month, day = int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8])
@@ -1262,7 +1273,7 @@ def _estimate_last_game_end(games, date_str):
         dt = datetime(year, month, day, hh, mm, tzinfo=KST)
         if latest is None or dt > latest:
             latest = dt
-    return latest + timedelta(hours=4) if latest else None
+    return latest + timedelta(hours=5, minutes=30) if latest else None
 
 
 def morning_schedule_fetch():
@@ -1299,7 +1310,23 @@ def start_game_mode():
 
 
 def stop_game_mode():
-    """마지막 경기 +5m 또는 종료 감지 후 트리거. Chrome OFF + 다음 날 준비."""
+    """마지막 경기 +여유시간 또는 종료 감지 후 트리거. Chrome OFF + 다음 날 준비.
+    단, 일정상 아직 안 끝난 경기가 있으면 OFF를 20분 미루고 재확인한다 (최종 점수 유실 방지).
+    새벽 02:00~03:59에는 마라톤 경기라도 무조건 OFF (03:55 morning fetch가 사이클 재시작)."""
+    today = get_game_date()
+    now_kst = datetime.now(KST)
+    past_hard_cap = 2 <= now_kst.hour < 4  # 02:00~03:59 KST → 무조건 OFF
+    if not past_hard_cap:
+        try:
+            scores = get_live_scores(force=True)  # OFF 직전 마지막 강제 갱신
+            if not _games_fully_settled(scores, today):
+                target = now_kst + timedelta(minutes=20)
+                schedule.clear('game_stop_once')
+                schedule.every().day.at(target.strftime('%H:%M'), "Asia/Seoul").do(stop_game_mode).tag('game_stop_once')
+                print(f"[scheduler] 미종료 경기 감지 - Chrome OFF를 {target.strftime('%H:%M')} KST로 연기")
+                return schedule.CancelJob
+        except Exception as e:
+            print(f"[scheduler] stop_game_mode 종료확인 오류: {e}")
     chrome.stop("game_mode_end")
     print(f"[scheduler] 게임 모드 종료 - Chrome OFF")
     _reschedule_next_morning()
