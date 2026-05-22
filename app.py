@@ -1174,6 +1174,11 @@ def _warm_caches_once():
                     _save_disk_cache(f'recent_{team}', recent_data)  # 팀별 디스크 저장
             except Exception as e:
                 print(f"[prewarm recent {team} 오류] {e}")
+
+        try:
+            _save_pitcher_disk_cache(today)  # 선발투수 절전 fallback용 (경기 후~다음 ON 사이)
+        except Exception as e:
+            print(f"[prewarm pitcher 오류] {e}")
     except Exception as e:
         print(f"[prewarm 사이클 오류] {e}")
 
@@ -1284,6 +1289,22 @@ def morning_schedule_fetch():
         chrome.start("morning_schedule_fetch")
         # 일정은 _get_schedule_rows()로 받지만 Selenium 사용 안 함 (일반 HTTP)
         games = get_kbo_schedule(today)
+
+        # ── 순위·선발 디스크 캐시 새벽 갱신 (절전 모드 fallback용) ──
+        # game_mode가 꺼진 아침~낮 시간대에도 위젯에 순위/선발이 보이도록 매일 최신화.
+        try:
+            ranking_data = get_team_ranking(force=True)
+            if ranking_data:
+                _save_disk_cache('ranking', ranking_data)
+                print(f"[scheduler] 순위 디스크 캐시 갱신 ({len(ranking_data)}팀)")
+        except Exception as e:
+            print(f"[scheduler] morning 순위 갱신 오류: {e}")
+        try:
+            # 선발은 오늘(달력 기준) 낮에 열릴 경기를 받는다 (get_game_date는 03:55에 '어제'를 가리킴)
+            _save_pitcher_disk_cache(datetime.now(KST).strftime('%Y%m%d'))
+        except Exception as e:
+            print(f"[scheduler] morning 선발 갱신 오류: {e}")
+
         if not games:
             print(f"[scheduler] {today} 경기 없음 - 휴식일, 다음 03:55까지 대기")
         else:
@@ -1629,6 +1650,23 @@ def _attach_pitcher_info(date_str, games):
     return games
 
 
+def _save_pitcher_disk_cache(date_str):
+    """date_str 경기의 선발투수 전체를 디스크에 저장 (절전 모드 fallback용).
+    선발 이름이 하나라도 있을 때만 저장 → 미발표/경기중(빈값)일 땐 기존 캐시 보존."""
+    try:
+        games = get_kbo_schedule(date_str)
+        if not games:
+            return
+        _attach_pitcher_info(date_str, games)
+        result = [{'away': g['away'], 'home': g['home'],
+                   'away_pitcher': g.get('away_pitcher', ''),
+                   'home_pitcher': g.get('home_pitcher', '')} for g in games]
+        if any(p['away_pitcher'] or p['home_pitcher'] for p in result):
+            _save_disk_cache('pitcher', result)
+    except Exception as e:
+        print(f"[pitcher disk 저장 오류 {date_str}] {e}")
+
+
 def _is_all_games_started_long_ago(games, base_date, hours_after_start=4):
     """일정의 모든 경기가 'base_date 시각 + hours_after_start' 이전에 시작되었는지.
     True면 모든 경기가 이미 끝났다고 추정 가능."""
@@ -1691,10 +1729,22 @@ def today_schedule():
 @app.route('/api/pitcher/today')
 def pitcher_today():
     """선발투수 전용 API — 무거운 Selenium 호출을 schedule API와 분리"""
-    # Chrome OFF 가드: 투수 정보는 Selenium 호출이 필요해서 캐시 없으면 빈 응답
-    if not chrome.is_active():
-        return jsonify(_empty_payload('pitcher'))
     team      = request.args.get('team')
+    # Chrome OFF 가드: Selenium 호출 대신 디스크 캐시 fallback.
+    # 선발은 경기 전 확정 정보라 절전 시간대(낮)에도 캐시로 보여줄 수 있어야 한다.
+    if not chrome.is_active():
+        disk_data, disk_ts = _load_disk_cache('pitcher')
+        if disk_data:
+            result = disk_data
+            if team:
+                result = [p for p in result if team in p['away'] or team in p['home']]
+            return jsonify({
+                'pitchers': result,
+                'cached_at': _iso_kst(disk_ts),
+                'note': '디스크 캐시 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        return jsonify(_empty_payload('pitcher'))
     today_str = get_game_date()
     today     = datetime.strptime(today_str, '%Y%m%d')
     games     = get_kbo_schedule(today_str)
