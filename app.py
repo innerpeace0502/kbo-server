@@ -1176,15 +1176,17 @@ def _warm_caches_once():
                 print(f"[prewarm recent {team} 오류] {e}")
 
         try:
-            _save_pitcher_disk_cache(today)  # 선발투수 절전 fallback용 (경기 후~다음 ON 사이)
+            _save_pitcher_disk_cache(today)   # 선발투수 절전 fallback용
+            _save_gameinfo_disk_cache(today)  # 투수(승/패/세이브)·스코어 절전 fallback용
         except Exception as e:
-            print(f"[prewarm pitcher 오류] {e}")
+            print(f"[prewarm pitcher/gameinfo 오류] {e}")
     except Exception as e:
         print(f"[prewarm 사이클 오류] {e}")
 
 
 def _bg_refresh_loop():
     time_module.sleep(2)  # 서버 기동 직후 혼잡 방지
+    _boot_warm()  # 부팅 1회 워밍 (절전이어도 캐시를 채워 재배포 직후 데이터 공백 방지)
     while True:
         interval = 300  # 기본: 5분
         try:
@@ -1667,6 +1669,69 @@ def _save_pitcher_disk_cache(date_str):
         print(f"[pitcher disk 저장 오류 {date_str}] {e}")
 
 
+def _save_gameinfo_disk_cache(date_str):
+    """경기별 gameinfo(스코어/투수)를 디스크에 저장 (절전 모드 투수 정보 fallback용)."""
+    try:
+        game_ids = get_game_id(date_str)
+        seen = set()
+        result = []
+        for gid in game_ids.values():
+            if gid in seen:
+                continue
+            seen.add(gid)
+            gc = get_pitcher_from_gamecenter(date_str, gid)
+            if gc:
+                result.append({
+                    'game_id': gid,
+                    'away': CODE_TEAM.get(gid[8:10], gid[8:10]),
+                    'home': CODE_TEAM.get(gid[10:12], gid[10:12]),
+                    'status': gc.get('status', ''),
+                    'away_score': gc.get('away_score', ''),
+                    'home_score': gc.get('home_score', ''),
+                    'away_pitchers': gc.get('away_pitchers', []),
+                    'home_pitchers': gc.get('home_pitchers', []),
+                })
+        if result:
+            _save_disk_cache('gameinfo_all', result)
+    except Exception as e:
+        print(f"[gameinfo disk 저장 오류 {date_str}] {e}")
+
+
+def _boot_warm():
+    """컨테이너 부팅 시 절전 모드여도 1회 데이터 워밍.
+    재배포로 /tmp·메모리 캐시가 비어 순위/투수/최근경기가 안 뜨던 공백을 방지한다.
+    Chrome을 잠깐 켜 받아서 캐시·디스크에 저장한 뒤 다시 끈다(절전 유지)."""
+    if _CHROME_ALWAYS_ON:
+        return  # 항상 ON이면 _bg_refresh_loop가 처리
+    try:
+        chrome.start("boot_warm")
+        today = get_game_date()
+        try:
+            get_live_scores(force=True)
+        except Exception as e:
+            print(f"[boot_warm scores 오류] {e}")
+        try:
+            rk = get_team_ranking(force=True)
+            if rk:
+                _save_disk_cache('ranking', rk)
+        except Exception as e:
+            print(f"[boot_warm ranking 오류] {e}")
+        for t in KBO_TEAMS:
+            try:
+                rc = get_recent_games(t, force=True)
+                if rc:
+                    _save_disk_cache(f'recent_{t}', rc)
+            except Exception as e:
+                print(f"[boot_warm recent {t} 오류] {e}")
+        _save_pitcher_disk_cache(today)
+        _save_gameinfo_disk_cache(today)
+        print("[boot_warm] 부팅 워밍 완료")
+    except Exception as e:
+        print(f"[boot_warm 오류] {e}")
+    finally:
+        chrome.stop("boot_warm_done")
+
+
 def _is_all_games_started_long_ago(games, base_date, hours_after_start=4):
     """일정의 모든 경기가 'base_date 시각 + hours_after_start' 이전에 시작되었는지.
     True면 모든 경기가 이미 끝났다고 추정 가능."""
@@ -1823,9 +1888,26 @@ def game_info():
     team  = request.args.get('team', '')
     today = get_game_date()
 
-    # Chrome OFF 가드: 캐시에 있는 게임 정보가 있으면 반환, 없으면 빈 응답
+    # Chrome OFF 가드: 디스크 캐시(gameinfo_all)에서 team 경기를 찾아 반환
     if not chrome.is_active():
-        # _gameinfo_cache는 game_id 기반이라 키 매칭이 까다로움 → 빈 응답으로 통일
+        disk, ts = _load_disk_cache('gameinfo_all')
+        if disk:
+            match = next((g for g in disk if (not team) or team in (g.get('away'), g.get('home'))), None)
+            if match:
+                return jsonify({
+                    'game_id':       match.get('game_id', ''),
+                    'away':          match.get('away', ''),
+                    'home':          match.get('home', ''),
+                    'status':        match.get('status', ''),
+                    'away_score':    match.get('away_score', ''),
+                    'home_score':    match.get('home_score', ''),
+                    'away_pitchers': match.get('away_pitchers', []),
+                    'home_pitchers': match.get('home_pitchers', []),
+                    'updated':       _fmt_ts(ts),
+                    'cached_at':     _iso_kst(ts),
+                    'note':          '디스크 캐시 (서버 절전 모드)',
+                    'chrome_mode':   chrome.mode(),
+                })
         return jsonify(_empty_payload('gameinfo'))
 
     game_ids = get_game_id(today)
