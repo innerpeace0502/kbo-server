@@ -1698,11 +1698,18 @@ def _save_gameinfo_disk_cache(date_str):
 
 
 def _boot_warm():
-    """컨테이너 부팅 시 절전 모드여도 1회 데이터 워밍.
-    재배포로 /tmp·메모리 캐시가 비어 순위/투수/최근경기가 안 뜨던 공백을 방지한다.
-    Chrome을 잠깐 켜 받아서 캐시·디스크에 저장한 뒤 다시 끈다(절전 유지)."""
+    """컨테이너 부팅 시 1회 데이터 워밍 + game_mode 재예약.
+
+    재배포로 /tmp·메모리 캐시·schedule 잡이 비어 순위/투수/최근경기가 안 뜨고
+    라이브 갱신이 멈추던 공백을 방지한다.
+
+    - 기본: Chrome을 잠깐 켜 데이터를 받아 캐시·디스크에 저장한 뒤 다시 끈다.
+    - 부팅 시점이 game_mode 시간대(첫경기 -2h05m ~ 마지막 +5m)이면 Chrome을 유지하고
+      game_mode를 재예약해 라이브 갱신을 즉시 복구한다.
+      (게임 도중 재시작이 라이브를 끊지 않게 하는 핵심 가드.)"""
     if _CHROME_ALWAYS_ON:
         return  # 항상 ON이면 _bg_refresh_loop가 처리
+    keep_chrome = False
     try:
         chrome.start("boot_warm")
         today = get_game_date()
@@ -1725,11 +1732,31 @@ def _boot_warm():
                 print(f"[boot_warm recent {t} 오류] {e}")
         _save_pitcher_disk_cache(today)
         _save_gameinfo_disk_cache(today)
+
+        # game_mode 재예약 — 재시작으로 잃은 schedule 잡 복구.
+        # 부팅이 game_mode 시간대 안이면 chrome을 유지해 _bg가 _warm을 이어가게 한다.
+        try:
+            games = get_kbo_schedule(today)
+            if games:
+                first_start = _parse_first_game_time(games, today)
+                last_end = _estimate_last_game_end(games, today)
+                if first_start and last_end:
+                    _schedule_game_mode(first_start, last_end)
+                    now_kst = datetime.now(KST)
+                    win_start = first_start - timedelta(hours=2, minutes=5)
+                    win_end = last_end + timedelta(minutes=5)
+                    if win_start <= now_kst <= win_end:
+                        keep_chrome = True
+                        print(f"[boot_warm] game_mode 시간대({win_start.strftime('%H:%M')}~{win_end.strftime('%H:%M')}) — Chrome 유지")
+        except Exception as e:
+            print(f"[boot_warm game_mode 재예약 오류] {e}")
+
         print("[boot_warm] 부팅 워밍 완료")
     except Exception as e:
         print(f"[boot_warm 오류] {e}")
     finally:
-        chrome.stop("boot_warm_done")
+        if not keep_chrome:
+            chrome.stop("boot_warm_done")
 
 
 def _is_all_games_started_long_ago(games, base_date, hours_after_start=4):
