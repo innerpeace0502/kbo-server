@@ -1792,8 +1792,10 @@ def today_schedule():
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
 
-    # ✅ 오늘 경기가 모두 종료(추정)되었거나 아예 없으면 다음 경기 찾기 (최대 7일)
-    if not games or _is_all_games_started_long_ago(games, today):
+    # ✅ 오늘 경기가 아예 없을 때만 다음 경기 찾기 (최대 7일).
+    # get_game_date()가 04:00 컷오프라 자정~04:00 사이엔 어제 게임 날짜를 유지하므로,
+    # 오늘 경기가 다 끝났어도 04:00이 지나기 전까진 결과를 그대로 보여준다.
+    if not games:
         for delta in range(1, 8):
             next_date = today + timedelta(days=delta)
             next_str = next_date.strftime('%Y%m%d')
