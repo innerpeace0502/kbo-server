@@ -1660,7 +1660,8 @@ def _save_pitcher_disk_cache(date_str):
         if not games:
             return
         _attach_pitcher_info(date_str, games)
-        result = [{'away': g['away'], 'home': g['home'],
+        result = [{'date': date_str,
+                   'away': g['away'], 'home': g['home'],
                    'away_pitcher': g.get('away_pitcher', ''),
                    'home_pitcher': g.get('home_pitcher', '')} for g in games]
         if any(p['away_pitcher'] or p['home_pitcher'] for p in result):
@@ -1824,18 +1825,21 @@ def pitcher_today():
     team      = request.args.get('team')
     # Chrome OFF 가드: Selenium 호출 대신 디스크 캐시 fallback.
     # 선발은 경기 전 확정 정보라 절전 시간대(낮)에도 캐시로 보여줄 수 있어야 한다.
+    # 단, 디스크 캐시는 24h 유효이므로 어제 데이터를 오늘 보여주지 않도록 date 비교로 거른다.
     if not chrome.is_active():
         disk_data, disk_ts = _load_disk_cache('pitcher')
         if disk_data:
-            result = disk_data
+            today_str = get_game_date()
+            result = [p for p in disk_data if p.get('date') == today_str]
             if team:
                 result = [p for p in result if team in p['away'] or team in p['home']]
-            return jsonify({
-                'pitchers': result,
-                'cached_at': _iso_kst(disk_ts),
-                'note': '디스크 캐시 (서버 절전 모드)',
-                'chrome_mode': chrome.mode(),
-            })
+            if result:
+                return jsonify({
+                    'pitchers': result,
+                    'cached_at': _iso_kst(disk_ts),
+                    'note': '디스크 캐시 (서버 절전 모드)',
+                    'chrome_mode': chrome.mode(),
+                })
         return jsonify(_empty_payload('pitcher'))
     today_str = get_game_date()
     today     = datetime.strptime(today_str, '%Y%m%d')
@@ -1915,11 +1919,18 @@ def game_info():
     team  = request.args.get('team', '')
     today = get_game_date()
 
-    # Chrome OFF 가드: 디스크 캐시(gameinfo_all)에서 team 경기를 찾아 반환
+    # Chrome OFF 가드: 디스크 캐시(gameinfo_all)에서 team 경기를 찾아 반환.
+    # 단, game_id 앞 8자리(yyyyMMdd)가 오늘과 같을 때만 — 어제 데이터를 오늘 표시하지 않도록.
     if not chrome.is_active():
         disk, ts = _load_disk_cache('gameinfo_all')
         if disk:
-            match = next((g for g in disk if (not team) or team in (g.get('away'), g.get('home'))), None)
+            today_str = get_game_date()
+            match = next(
+                (g for g in disk
+                 if g.get('game_id', '')[:8] == today_str
+                    and ((not team) or team in (g.get('away'), g.get('home')))),
+                None,
+            )
             if match:
                 return jsonify({
                     'game_id':       match.get('game_id', ''),
