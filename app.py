@@ -1138,6 +1138,9 @@ def _warm_caches_once():
     try:
         today = get_game_date()
         scores = get_live_scores(force=True)  # 내부에서 snapshot도 force=True로 처리
+        # scores도 디스크에 저장(메모리만이던 약점 보강 — 컨테이너 재시작 후에도 살아남음)
+        if scores:
+            _save_disk_cache('scores', {'date': today, 'scores': scores})
 
         # ✅ 경기 종료 자동 감지 (CHROME_ALWAYS_ON=false 모드에서만 의미 있음)
         # 일정상 모든 경기가 종료/취소로 확정됐을 때만 OFF 예약 (누락 경기 있으면 보류)
@@ -1715,7 +1718,9 @@ def _boot_warm():
         chrome.start("boot_warm")
         today = get_game_date()
         try:
-            get_live_scores(force=True)
+            scores = get_live_scores(force=True)
+            if scores:
+                _save_disk_cache('scores', {'date': today, 'scores': scores})
         except Exception as e:
             print(f"[boot_warm scores 오류] {e}")
         try:
@@ -1898,6 +1903,7 @@ def live_scores():
     # Chrome OFF 가드: 절전 모드면 캐시만 반환 (Selenium 호출 금지)
     if not chrome.is_active():
         today = get_game_date()
+        # 1순위: 메모리 캐시
         if _scores_cache and _scores_cache_date == today:
             cached = _scores_cache
             if team:
@@ -1907,6 +1913,19 @@ def live_scores():
                 'updated': _fmt_ts(_scores_cache_time),
                 'cached_at': _iso_kst(_scores_cache_time),
                 'note': '캐시된 결과 (서버 절전 모드)',
+                'chrome_mode': chrome.mode(),
+            })
+        # 2순위: 디스크 캐시 (컨테이너 재시작으로 메모리가 비어도 복구 가능)
+        disk, ts = _load_disk_cache('scores')
+        if disk and isinstance(disk, dict) and disk.get('date') == today:
+            cached = disk.get('scores', [])
+            if team:
+                cached = [s for s in cached if team in s['away'] or team in s['home']]
+            return jsonify({
+                'scores': cached,
+                'updated': _fmt_ts(ts),
+                'cached_at': _iso_kst(ts),
+                'note': '디스크 캐시 (서버 절전 모드)',
                 'chrome_mode': chrome.mode(),
             })
         return jsonify(_empty_payload('scores'))
@@ -2088,6 +2107,28 @@ def debug_scheduler():
         'tz_offset_hours': (sys_now - kst_now.replace(tzinfo=None)).total_seconds() / 3600,
         'jobs_count': len(schedule.jobs),
         'jobs': jobs_info,
+    })
+
+
+@app.route('/api/debug/warm')
+def debug_warm():
+    """수동 워밍 트리거 — game_mode 잡이 어떤 이유로 발사 안 됐을 때 강제로 한 사이클 돌린다.
+    chrome 강제 ON → _warm_caches_once → chrome OFF(절전 복귀).
+    호출 후 /api/scores·/api/gameinfo 등이 채워진다."""
+    if _CHROME_ALWAYS_ON:
+        return jsonify({'note': 'CHROME_ALWAYS_ON 모드 — 워밍 불필요', 'chrome_active': chrome.is_active()})
+    try:
+        chrome.start("debug_warm")
+        _warm_caches_once()
+    except Exception as e:
+        return jsonify({'error': str(e), 'note': 'warming 중 오류'}), 500
+    finally:
+        chrome.stop("debug_warm_done")
+    return jsonify({
+        'note': '수동 워밍 완료 — scores/gameinfo/ranking/recent 디스크·메모리 갱신',
+        'scores_cache_date': _scores_cache_date,
+        'scores_count': len(_scores_cache) if _scores_cache else 0,
+        'chrome_mode': chrome.mode(),
     })
 
 
