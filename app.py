@@ -2117,13 +2117,23 @@ def debug_warm():
     호출 후 /api/scores·/api/gameinfo 등이 채워진다."""
     if _CHROME_ALWAYS_ON:
         return jsonify({'note': 'CHROME_ALWAYS_ON 모드 — 워밍 불필요', 'chrome_active': chrome.is_active()})
+    err = None
+    started = False
     try:
         chrome.start("debug_warm")
+        started = True
         _warm_caches_once()
     except Exception as e:
-        return jsonify({'error': str(e), 'note': 'warming 중 오류'}), 500
+        err = str(e)
     finally:
-        chrome.stop("debug_warm_done")
+        if started:
+            # chrome.stop은 finally 안에서도 안전하게 — 여기서 예외 나면 Flask 500이 됨
+            try:
+                chrome.stop("debug_warm_done")
+            except Exception as e2:
+                print(f"[debug_warm chrome.stop 오류] {e2}")
+    if err:
+        return jsonify({'error': err, 'note': 'warming 중 오류'}), 500
     return jsonify({
         'note': '수동 워밍 완료 — scores/gameinfo/ranking/recent 디스크·메모리 갱신',
         'scores_cache_date': _scores_cache_date,
