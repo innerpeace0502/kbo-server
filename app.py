@@ -748,7 +748,12 @@ def get_live_scores(force=False):
                                 'away_score': away_score, 'home_score': home_score,
                                 'status': '2', 'inning': '경기종료'
                             })
-                    i += 10
+                        # ✅ 종료 블록 줄 수 가변 (6줄=투수정보 없음 / 10줄=구버전).
+                        # i+=10 고정이면 6줄 블록 직후의 다음 경기 시작 라인을 통째로 건너뛴다
+                        # (예: 대구 6줄 종료 → i=32로 점프 → 잠실 블록 시작 28을 놓침).
+                        i = vs_idx + 2
+                    else:
+                        i += 6
                     continue
 
                 elif re.match(r'\d+회[초말]', status_line):
