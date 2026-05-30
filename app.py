@@ -606,6 +606,19 @@ def _get_today_stadium_map(today):
                         break
     except Exception as e:
         print(f"[구장맵 오류] {e}")
+
+    # ✅ Fallback: _get_schedule_rows 매핑이 일부 구장(잠실 등)을 놓치는 케이스 보강.
+    # get_kbo_schedule(HTTP API)은 stadium을 별도 필드로 안정적으로 주므로, 누락된 구장만 채운다.
+    try:
+        for g in get_kbo_schedule(today):
+            s = (g.get('stadium') or '').strip()
+            away = (g.get('away') or '').strip()
+            home = (g.get('home') or '').strip()
+            if s and away and home and s not in stadium_map:
+                stadium_map[s] = (away, home)
+    except Exception as e:
+        print(f"[구장맵 schedule 보강 오류] {e}")
+
     return stadium_map
 
 
