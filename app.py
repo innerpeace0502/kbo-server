@@ -2123,6 +2123,27 @@ def debug_scheduler():
     })
 
 
+@app.route('/api/debug/stadium_map')
+def debug_stadium_map():
+    """진단용: 오늘 stadium_team_map 빌드 결과 노출. 잠실 등 누락 확인용."""
+    today = get_game_date()
+    sm = _get_today_stadium_map(today)
+    sched = []
+    try:
+        for g in get_kbo_schedule(today):
+            sched.append({
+                'stadium': g.get('stadium'), 'away': g.get('away'), 'home': g.get('home'),
+            })
+    except Exception as e:
+        sched = [{'error': str(e)}]
+    return jsonify({
+        'today': today,
+        'stadium_map': {k: list(v) for k, v in sm.items()},
+        'stadium_map_count': len(sm),
+        'schedule': sched,
+    })
+
+
 @app.route('/api/debug/warm')
 def debug_warm():
     """수동 워밍 트리거 — game_mode 잡이 어떤 이유로 발사 안 됐을 때 강제로 한 사이클 돌린다.
