@@ -2151,33 +2151,22 @@ def debug_stadium_map():
 
 @app.route('/api/debug/warm')
 def debug_warm():
-    """수동 워밍 트리거 — game_mode 잡이 어떤 이유로 발사 안 됐을 때 강제로 한 사이클 돌린다.
-    chrome 강제 ON → _warm_caches_once → chrome OFF(절전 복귀).
-    호출 후 /api/scores·/api/gameinfo 등이 채워진다."""
+    """수동 워밍 트리거 — game_mode 잡이 어떤 이유로 발사 안 됐을 때 사용.
+
+    _boot_warm을 백그라운드 스레드로 실행해 ① 데이터 워밍 ② game_mode 재예약
+    ③ 게임 시간대 안이면 chrome 유지까지 모두 수행한다. 즉시 응답해 Railway
+    게이트웨이 timeout(약 100초)을 회피한다. 1~2분 뒤 /api/scores·
+    /api/debug/scheduler 등으로 결과 확인."""
     if _CHROME_ALWAYS_ON:
         return jsonify({'note': 'CHROME_ALWAYS_ON 모드 — 워밍 불필요', 'chrome_active': chrome.is_active()})
-    err = None
-    started = False
     try:
-        chrome.start("debug_warm")
-        started = True
-        _warm_caches_once()
+        threading.Thread(target=_boot_warm, daemon=True, name='wbb-debug-warm').start()
     except Exception as e:
-        err = str(e)
-    finally:
-        if started:
-            # chrome.stop은 finally 안에서도 안전하게 — 여기서 예외 나면 Flask 500이 됨
-            try:
-                chrome.stop("debug_warm_done")
-            except Exception as e2:
-                print(f"[debug_warm chrome.stop 오류] {e2}")
-    if err:
-        return jsonify({'error': err, 'note': 'warming 중 오류'}), 500
+        return jsonify({'error': str(e), 'note': 'thread 시작 오류'}), 500
     return jsonify({
-        'note': '수동 워밍 완료 — scores/gameinfo/ranking/recent 디스크·메모리 갱신',
-        'scores_cache_date': _scores_cache_date,
-        'scores_count': len(_scores_cache) if _scores_cache else 0,
-        'chrome_mode': chrome.mode(),
+        'note': '_boot_warm 백그라운드 시작 — 1~2분 뒤 /api/scores·/api/debug/scheduler 확인',
+        'chrome_mode_before': chrome.mode(),
+        'kst_now': datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S'),
     })
 
 
