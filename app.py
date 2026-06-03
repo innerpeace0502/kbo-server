@@ -971,50 +971,74 @@ def get_pitcher_from_gamecenter(today, game_id, force=False):
 
 
 def get_team_ranking(force=False):
-    """팀 순위 (싱글톤 드라이버 + 조건부 대기)"""
+    """팀 순위 (싱글톤 드라이버 + 조건부 대기).
+
+    KBO가 모바일 페이지(m.koreabaseball.com/Kbo/TeamRank.aspx)를 올스타 투표 등
+    시즌 이벤트 콘텐츠로 임시 교체하는 일이 있어(2026-06-03 확인), PC 페이지를
+    1순위로 시도하고 비면 모바일을 fallback으로 시도한다. 양쪽 형식이 다르므로
+    정규식도 둘 다 지원한다.
+    """
     global _ranking_cache, _ranking_cache_time
     now = time_module.time()
     if not force and _ranking_cache and now - _ranking_cache_time < _TTL_RANKING:
         return _ranking_cache
 
-    try:
-        body = _fetch_body_text(
-            'https://m.koreabaseball.com/Kbo/TeamRank.aspx',
-            wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
-        )
-        if body is None:
-            return _ranking_cache
+    # PC 형식(2026-06 확인):
+    #   "1 LG 54 34 20 0 0.630 0 8승0무2패 4승 19-0-10 15-0-10"
+    #   = 순위 팀 경기 승 패 무 승률 게임차 최근10경기 연속 홈성적 방문성적
+    # streak는 9번째 컬럼(연속)에 위치. 최근10경기는 버린다.
+    pc_re = re.compile(
+        r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)'
+        r'\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\S+)'
+        r'\s+\S+\s+(\S+)'
+    )
+    # 모바일 형식(2026-05 확인):
+    #   "1 삼성 43 25 17 1 0.595 - 1승"
+    #   = 순위 팀명 경기 승 패 무 승률 게임차 연속
+    mobile_re = re.compile(
+        r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)'
+        r'\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s*$'
+    )
 
-        lines = [l.strip() for l in body.split('\n') if l.strip()]
-        ranking = []
+    urls = [
+        ('PC',     'https://www.koreabaseball.com/Record/TeamRank/TeamRankDaily.aspx'),
+        ('mobile', 'https://m.koreabaseball.com/Kbo/TeamRank.aspx'),
+    ]
 
-        # ✅ KBO 순위 페이지가 한 줄 통합 형식으로 변경됨 (2026-05 확인):
-        #   "1 삼성 43 25 17 1 0.595 - 1승"
-        #   = 순위 팀명 경기 승 패 무 승률 게임차 연속
-        # 게임차는 "-" 또는 "0.5"/"3" 등이므로 \S+ 로 매칭, 연속은 .+ 로.
-        row_re = re.compile(
-            r'^(\d+)\s+(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)'
-            r'\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(.+)$'
-        )
-        for line in lines:
-            m = row_re.match(line)
-            if m:
-                ranking.append({
-                    'rank':  m.group(1), 'team':   m.group(2),
-                    'games': m.group(3), 'win':    m.group(4),
-                    'lose':  m.group(5), 'draw':   m.group(6),
-                    'pct':   m.group(7), 'gb':     m.group(8),
-                    'streak':m.group(9),
-                })
+    for label, url in urls:
+        try:
+            body = _fetch_body_text(
+                url,
+                wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
+            )
+            if body is None:
+                print(f"[순위] {label} body 없음 → 다음 URL 시도")
+                continue
 
-        if ranking:
-            _ranking_cache = ranking
-            _ranking_cache_time = time_module.time()
-        return ranking
+            lines = [l.strip() for l in body.split('\n') if l.strip()]
+            ranking = []
+            for line in lines:
+                m = pc_re.match(line) or mobile_re.match(line)
+                if m:
+                    ranking.append({
+                        'rank':  m.group(1), 'team':   m.group(2),
+                        'games': m.group(3), 'win':    m.group(4),
+                        'lose':  m.group(5), 'draw':   m.group(6),
+                        'pct':   m.group(7), 'gb':     m.group(8),
+                        'streak':m.group(9),
+                    })
 
-    except Exception as e:
-        print(f"[순위 오류] {e}")
-        return _ranking_cache
+            if ranking:
+                _ranking_cache = ranking
+                _ranking_cache_time = time_module.time()
+                print(f"[순위] {label} OK ({len(ranking)}팀)")
+                return ranking
+            print(f"[순위] {label} 0개 매칭 → 다음 URL 시도")
+        except Exception as e:
+            print(f"[순위 오류] {label} → {e}")
+            continue
+
+    return _ranking_cache
 
 
 def get_recent_games(team, force=False):
@@ -2183,14 +2207,21 @@ def debug_raw():
     실제 텍스트 구조와 파싱 로직 불일치를 진단한다."""
     kind = request.args.get('kind', 'gamecenter')
     today = get_game_date()
-    if kind == 'ranking':
+    if kind in ('ranking', 'ranking_pc', 'ranking_mobile'):
+        # ranking(기본)·ranking_pc → PC 페이지, ranking_mobile → 모바일 페이지.
+        # KBO 모바일 페이지가 올스타 투표 등으로 임시 교체될 때 비교 진단용.
+        url = (
+            'https://m.koreabaseball.com/Kbo/TeamRank.aspx'
+            if kind == 'ranking_mobile'
+            else 'https://www.koreabaseball.com/Record/TeamRank/TeamRankDaily.aspx'
+        )
         body = _fetch_body_text(
-            'https://m.koreabaseball.com/Kbo/TeamRank.aspx',
+            url,
             wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
         )
         lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
         return jsonify({
-            'kind': 'ranking', 'today': today,
+            'kind': kind, 'url': url, 'today': today,
             'body_is_none': body is None,
             'line_count': len(lines), 'lines': lines,
         })
