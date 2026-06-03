@@ -1324,7 +1324,12 @@ def morning_schedule_fetch():
             print(f"[scheduler] morning 순위 갱신 오류: {e}")
         try:
             # 선발은 오늘(달력 기준) 낮에 열릴 경기를 받는다 (get_game_date는 03:55에 '어제'를 가리킴)
-            _save_pitcher_disk_cache(datetime.now(KST).strftime('%Y%m%d'))
+            cal_today = datetime.now(KST).strftime('%Y%m%d')
+            _save_pitcher_disk_cache(cal_today)
+            # ✅ gameinfo도 morning에서 디스크 저장 — 그래야 절전 시간대(낮)에 /api/gameinfo
+            # fallback이 동작해 앱이 호출하는 라우트에서도 선발투수 정보를 받을 수 있다.
+            # (기존엔 _warm_caches_once에만 있어 game_mode 안 돈 날 빈 응답이 됨)
+            _save_gameinfo_disk_cache(cal_today)
         except Exception as e:
             print(f"[scheduler] morning 선발 갱신 오류: {e}")
 
