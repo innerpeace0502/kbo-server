@@ -1330,9 +1330,18 @@ def _estimate_last_game_end(games, date_str):
 
 def morning_schedule_fetch():
     """매일 03:55 트리거. 오늘 일정 받고 게임 모드 예약 후 Chrome OFF.
-    휴식일(경기 없음)은 즉시 OFF하고 다음 날 03:55까지 대기."""
+    휴식일(경기 없음)은 즉시 OFF하고 다음 날 03:55까지 대기.
+
+    ⚠️ 03:55는 get_game_date()의 04:00 컷오프 이전이라 그대로 쓰면 '어제' 일정을
+    가리킨다. 어제가 휴식일(통상 월요일)이면 어제 일정이 비어 _schedule_game_mode가
+    호출되지 않아 오늘(화요일) 저녁 game_mode가 안 잡힌다(과거 5/26·6/9 재발 패턴).
+    따라서 일정 조회·예약은 명시적으로 KST 달력상 '오늘'(cal_today)을 쓴다.
+    """
     try:
-        today = get_game_date()
+        # KST 달력상 오늘 (03:55 시점에서 자정 지난 그날의 yyyymmdd).
+        # 선발/gameinfo 디스크 캐시는 이미 cal_today를 쓰고 있었고, 일정 조회만
+        # get_game_date()를 써서 '월요일 휴식일 → 화요일 game_mode 미발사' 함정이 있었음.
+        today = datetime.now(KST).strftime('%Y%m%d')
         chrome.start("morning_schedule_fetch")
         # 일정은 _get_schedule_rows()로 받지만 Selenium 사용 안 함 (일반 HTTP)
         games = get_kbo_schedule(today)
@@ -1347,13 +1356,11 @@ def morning_schedule_fetch():
         except Exception as e:
             print(f"[scheduler] morning 순위 갱신 오류: {e}")
         try:
-            # 선발은 오늘(달력 기준) 낮에 열릴 경기를 받는다 (get_game_date는 03:55에 '어제'를 가리킴)
-            cal_today = datetime.now(KST).strftime('%Y%m%d')
-            _save_pitcher_disk_cache(cal_today)
-            # ✅ gameinfo도 morning에서 디스크 저장 — 그래야 절전 시간대(낮)에 /api/gameinfo
-            # fallback이 동작해 앱이 호출하는 라우트에서도 선발투수 정보를 받을 수 있다.
-            # (기존엔 _warm_caches_once에만 있어 game_mode 안 돈 날 빈 응답이 됨)
-            _save_gameinfo_disk_cache(cal_today)
+            # 선발/gameinfo도 today(=KST 달력 오늘)와 동일 키로 저장 → 절전 시간대(낮)
+            # /api/gameinfo·/api/pitcher fallback이 동작해 앱이 호출하는 라우트에서도
+            # 선발투수 정보를 받을 수 있다.
+            _save_pitcher_disk_cache(today)
+            _save_gameinfo_disk_cache(today)
         except Exception as e:
             print(f"[scheduler] morning 선발 갱신 오류: {e}")
 
