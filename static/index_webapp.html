@@ -216,7 +216,10 @@ body {
 .pitcher-name { font-size: 12px; color: #CCC; }
 .pitcher-sep  { font-size: 10px; color: #444; }
 
-/* ── 양팀 순위 카드 (앱 9f72cc3 동기화: 팀명 칩 + 전적 / 순위 큰 숫자 2줄) ── */
+/* ── 양팀 순위 카드 (앱 9f72cc3 동기화: 팀명 칩 + 전적 / 큰 순위 숫자 2줄) ──
+   윗줄: [팀명 둥근 칩] [전적 작은 글씨]  ← 가로 한 행
+   아랫줄: [4위]                          ← 큰 숫자, 좌측 정렬
+*/
 .rank-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -227,18 +230,17 @@ body {
   background: #1A1A2A;
   border: 1px solid #222234;
   border-radius: 12px;
-  padding: 10px 8px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.rank-left {
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 4px;
-  min-width: 0;
+  gap: 6px;
+}
+.rank-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 /* 팀명 둥근 칩 — backgroundColor는 JS의 TEAM_COLORS 매핑(MainActivity.TEAM_COLORS 동일) */
 .team-chip {
@@ -251,7 +253,7 @@ body {
   background: #555;
   white-space: nowrap;
 }
-.rank-rec   { font-size: 10px; color: #AAA; }
+.rank-rec   { font-size: 11px; color: #AAA; }
 .rank-num   { font-size: 22px; font-weight: 700; color: #FFD700; line-height: 1; }
 
 /* ── 최근 10경기 ── */
@@ -451,17 +453,17 @@ body {
       </div>
     </div>
 
-    <!-- 양팀 순위 (앱 9f72cc3 동기화: 팀명 둥근 칩 + 전적 / 순위 2줄) -->
+    <!-- 양팀 순위 (앱 9f72cc3 동기화: 윗줄=칩+전적 / 아랫줄=큰 순위) -->
     <div class="rank-row">
       <div class="rank-card">
-        <div class="rank-left">
+        <div class="rank-row-top">
           <span class="team-chip" id="away-team-chip">-</span>
           <span class="rank-rec" id="away-rank-rec"></span>
         </div>
         <div class="rank-num" id="away-rank">-</div>
       </div>
       <div class="rank-card">
-        <div class="rank-left">
+        <div class="rank-row-top">
           <span class="team-chip" id="home-team-chip">-</span>
           <span class="rank-rec" id="home-rank-rec"></span>
         </div>
