@@ -30,12 +30,28 @@ body {
   padding: 14px;
   margin-bottom: 12px;
 }
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
 .settings-title {
   font-size: 14px;
   font-weight: 700;
   color: #FFD700;
-  margin-bottom: 10px;
 }
+/* 설정 영역 접기/펼치기 토글 (앱 09faeb9 동기화: 펼침=◀, 접힘=▼, localStorage 영속) */
+.settings-toggle {
+  background: transparent;
+  border: none;
+  color: #FFD700;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 2px 8px;
+  line-height: 1;
+}
+.settings-body.collapsed { display: none; }
 .select-row {
   display: flex;
   gap: 8px;
@@ -110,6 +126,9 @@ body {
 .badge-ended { background: #1A1A1A; border: 1px solid #2A2A2A; color: #999; }
 .badge-live   { background: #261010; border: 1px solid #4D1515; color: #FF6B6B; }
 .badge-pre    { background: #1A1800; border: 1px solid #3A3000; color: #FFD700; }
+/* 우천취소(status=3) — 앱 MainActivity.updateScoreCard "3" 분기 색상과 동기화
+   text #8AB4F8(비 연상 청회색), 배경 #16202E, 테두리 #2A3D52 */
+.badge-cancel { background: #16202E; border: 1px solid #2A3D52; color: #8AB4F8; }
 
 /* ── 메인 경기 카드 ── */
 .game-card {
@@ -197,7 +216,7 @@ body {
 .pitcher-name { font-size: 12px; color: #CCC; }
 .pitcher-sep  { font-size: 10px; color: #444; }
 
-/* ── 양팀 순위 카드 ── */
+/* ── 양팀 순위 카드 (앱 9f72cc3 동기화: 팀명 칩 + 전적 / 순위 큰 숫자 2줄) ── */
 .rank-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -208,12 +227,32 @@ body {
   background: #1A1A2A;
   border: 1px solid #222234;
   border-radius: 12px;
-  padding: 10px;
-  text-align: center;
+  padding: 10px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
-.rank-label { font-size: 10px; color: #666; margin-bottom: 3px; }
-.rank-num   { font-size: 28px; font-weight: 700; color: #FFD700; line-height: 1; }
-.rank-rec   { font-size: 10px; color: #555; margin-top: 3px; }
+.rank-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+/* 팀명 둥근 칩 — backgroundColor는 JS의 TEAM_COLORS 매핑(MainActivity.TEAM_COLORS 동일) */
+.team-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #FFFFFF;
+  background: #555;
+  white-space: nowrap;
+}
+.rank-rec   { font-size: 10px; color: #AAA; }
+.rank-num   { font-size: 22px; font-weight: 700; color: #FFD700; line-height: 1; }
 
 /* ── 최근 10경기 ── */
 .recent-row {
@@ -274,11 +313,19 @@ body {
 .ranking-table td.num   { text-align: right; color: #666; width: 26px; }
 .ranking-table td.streak-w { text-align: right; color: #4CD964; font-weight: 600; width: 36px; padding-left: 6px; }
 .ranking-table td.streak-l { text-align: right; color: #FF6B6B; font-weight: 600; width: 36px; padding-left: 6px; }
-.ranking-table tr.highlight td { background: rgba(255,215,0,0.06); }
-.ranking-table tr.highlight td.rank  { color: #FFD700; }
-.ranking-table tr.highlight td.team  { color: #FFD700; font-weight: 700; }
-.ranking-table tr.highlight td.pct   { color: #FFD700; }
-.ranking-table tr.highlight td.num   { color: #FFD700; }
+/* 응원팀 하이라이트 — 앱 MainActivity.renderRanking InsetDrawable 효과 등가물
+   첫·마지막 셀에 좌우 inset(3px) + 약한 노란 배경 + 둥근 모서리 */
+.ranking-table tr.highlight td { background: #14140A; color: #FFD700; font-weight: 600; }
+.ranking-table tr.highlight td.rank   { color: #FFD700; font-weight: 700; }
+.ranking-table tr.highlight td.team   { color: #FFD700; font-weight: 700; }
+.ranking-table tr.highlight td.pct    { color: #FFD700; }
+.ranking-table tr.highlight td.num    { color: #FFD700; }
+.ranking-table tr.highlight td:first-child { border-top-left-radius: 5px; border-bottom-left-radius: 5px; box-shadow: inset 3px 0 0 #1A1A2A; }
+.ranking-table tr.highlight td:last-child  { border-top-right-radius: 5px; border-bottom-right-radius: 5px; box-shadow: inset -3px 0 0 #1A1A2A; }
+/* 모든 컬럼 가운데 정렬 (앱은 모든 셀 Gravity.CENTER) */
+.ranking-table th, .ranking-table td { text-align: center; }
+.ranking-table td.rank, .ranking-table td.team, .ranking-table td.pct, .ranking-table td.num,
+.ranking-table td.streak-w, .ranking-table td.streak-l { text-align: center; }
 
 /* ── 로딩 ── */
 .loading {
@@ -315,37 +362,42 @@ body {
 <body>
 <div class="container">
 
-  <!-- 설정 영역 -->
+  <!-- 설정 영역 (앱 09faeb9: 접기/펼치기 토글) -->
   <div class="settings-card">
-    <div class="settings-title">KBO 위젯</div>
-    <div class="select-row">
-      <div class="select-item">
-        <div class="select-label">응원 팀</div>
-        <select id="sel-team">
-          <option value="">전체</option>
-          <option value="LG">LG</option>
-          <option value="KT">KT</option>
-          <option value="SSG">SSG</option>
-          <option value="NC">NC</option>
-          <option value="두산">두산</option>
-          <option value="KIA">KIA</option>
-          <option value="롯데">롯데</option>
-          <option value="삼성">삼성</option>
-          <option value="한화">한화</option>
-          <option value="키움">키움</option>
-        </select>
-      </div>
-      <div class="select-item">
-        <div class="select-label">IPTV</div>
-        <select id="sel-iptv">
-          <option value="">선택안함</option>
-          <option value="genie">지니TV (KT)</option>
-          <option value="Uplus">U+TV (LGU+)</option>
-          <option value="btv">BTV (SKT)</option>
-        </select>
-      </div>
+    <div class="settings-header">
+      <span class="settings-title">KBO 위젯</span>
+      <button class="settings-toggle" id="btn-settings-toggle" onclick="toggleSettings()" aria-label="설정 토글">◀</button>
     </div>
-    <button class="save-btn" onclick="applySettings()">저장하고 새로고침</button>
+    <div class="settings-body" id="settings-body">
+      <div class="select-row">
+        <div class="select-item">
+          <div class="select-label">응원 팀</div>
+          <select id="sel-team">
+            <option value="">전체</option>
+            <option value="LG">LG</option>
+            <option value="KT">KT</option>
+            <option value="SSG">SSG</option>
+            <option value="NC">NC</option>
+            <option value="두산">두산</option>
+            <option value="KIA">KIA</option>
+            <option value="롯데">롯데</option>
+            <option value="삼성">삼성</option>
+            <option value="한화">한화</option>
+            <option value="키움">키움</option>
+          </select>
+        </div>
+        <div class="select-item">
+          <div class="select-label">IPTV</div>
+          <select id="sel-iptv">
+            <option value="">선택안함</option>
+            <option value="genie">지니TV (KT)</option>
+            <option value="Uplus">U+TV (LGU+)</option>
+            <option value="btv">BTV (SKT)</option>
+          </select>
+        </div>
+      </div>
+      <button class="save-btn" onclick="applySettings()">저장하고 새로고침</button>
+    </div>
   </div>
 
   <div class="status-msg" id="status-msg"></div>
@@ -399,17 +451,21 @@ body {
       </div>
     </div>
 
-    <!-- 양팀 순위 -->
+    <!-- 양팀 순위 (앱 9f72cc3 동기화: 팀명 둥근 칩 + 전적 / 순위 2줄) -->
     <div class="rank-row">
       <div class="rank-card">
-        <div class="rank-label" id="away-rank-label"></div>
+        <div class="rank-left">
+          <span class="team-chip" id="away-team-chip">-</span>
+          <span class="rank-rec" id="away-rank-rec"></span>
+        </div>
         <div class="rank-num" id="away-rank">-</div>
-        <div class="rank-rec" id="away-rank-rec"></div>
       </div>
       <div class="rank-card">
-        <div class="rank-label" id="home-rank-label"></div>
+        <div class="rank-left">
+          <span class="team-chip" id="home-team-chip">-</span>
+          <span class="rank-rec" id="home-rank-rec"></span>
+        </div>
         <div class="rank-num" id="home-rank">-</div>
-        <div class="rank-rec" id="home-rank-rec"></div>
       </div>
     </div>
 
@@ -454,9 +510,31 @@ body {
 <script>
 const BASE = 'https://web-production-6aae76.up.railway.app';
 
+// 팀 컬러 — MainActivity.TEAM_COLORS와 동일 매핑 (3곳 동기화 필수: app.py 로고 / MainActivity / KboWidgetProvider)
+const TEAM_COLORS = {
+  'LG':  '#C30452', 'KT':  '#E31E26', 'SSG': '#CE0E2D', 'NC':  '#071D49',
+  '두산': '#131230', 'KIA': '#EA0029', '롯데': '#041E42', '삼성': '#0055A8',
+  '한화': '#FF6600', '키움': '#820024'
+};
+
+// 자동 갱신 폴링 — 앱 SCORE_REFRESH_INTERVAL=30000과 동일.
+// 라이브 중(status=1)에만 폴링, 종료/취소(2/3)면 중지.
+const REFRESH_INTERVAL = 30 * 1000;
+let refreshTimer = null;
+function startRefreshLoop() {
+  if (refreshTimer) return;
+  refreshTimer = setInterval(() => { loadScores(); loadPitcher(); }, REFRESH_INTERVAL);
+}
+function stopRefreshLoop() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+}
+
+// URL 파라미터 우선, 없으면 localStorage (Glimpse2 등 외부 앱 지원)
+const _urlParams = new URLSearchParams(window.location.search);
+
 let state = {
-  team: localStorage.getItem('kbo_team') || '',
-  iptv: localStorage.getItem('kbo_iptv') || '',
+  team: _urlParams.get('team') || localStorage.getItem('kbo_team') || '',
+  iptv: _urlParams.get('iptv') || localStorage.getItem('kbo_iptv') || '',
   away: '', home: '',
   rankingCache: null,
   rankingTime: 0,
@@ -465,6 +543,24 @@ let state = {
 // 저장된 설정 복원
 document.getElementById('sel-team').value = state.team;
 document.getElementById('sel-iptv').value = state.iptv;
+
+// 설정 영역 접기/펼치기 토글 (앱 09faeb9 동기화: 펼침=◀, 접힘=▼)
+function toggleSettings() {
+  const body = document.getElementById('settings-body');
+  const btn  = document.getElementById('btn-settings-toggle');
+  const collapsed = !body.classList.contains('collapsed');
+  body.classList.toggle('collapsed', collapsed);
+  btn.textContent = collapsed ? '▼' : '◀';
+  localStorage.setItem('kbo_settings_collapsed', collapsed ? '1' : '0');
+}
+// 초기 상태 복원 (기본 펼침)
+(function restoreSettingsToggle() {
+  const collapsed = localStorage.getItem('kbo_settings_collapsed') === '1';
+  if (collapsed) {
+    document.getElementById('settings-body').classList.add('collapsed');
+    document.getElementById('btn-settings-toggle').textContent = '▼';
+  }
+})();
 
 function applySettings() {
   state.team = document.getElementById('sel-team').value;
@@ -477,6 +573,14 @@ function applySettings() {
 
 function setStatus(msg) {
   document.getElementById('status-msg').textContent = msg;
+}
+
+// 팀명 둥근 칩에 팀명 + 팀 컬러 적용 (앱 applyTeamChip 등가물)
+function applyTeamChip(elId, team) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.textContent = team || '-';
+  el.style.backgroundColor = TEAM_COLORS[team] || '#555555';
 }
 
 async function fetchJSON(url) {
@@ -508,13 +612,14 @@ async function loadAll() {
     document.getElementById('game-date').textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
     document.getElementById('away-name').textContent = game.away;
     document.getElementById('home-name').textContent = game.home;
-    document.getElementById('away-rank-label').textContent = `${game.away} 순위`;
-    document.getElementById('home-rank-label').textContent = `${game.home} 순위`;
+    // 양팀 순위 카드의 팀명 칩 (앱 9f72cc3 동기화)
+    applyTeamChip('away-team-chip', game.away);
+    applyTeamChip('home-team-chip', game.home);
     document.getElementById('away-recent-title').textContent = `최근 10경기 · ${game.away}`;
     document.getElementById('home-recent-title').textContent = `최근 10경기 · ${game.home}`;
     document.getElementById('stadium').textContent = game.stadium || '';
 
-    // 로고 (한글 팀명 URL 안전 인코딩 + 로드 실패 시 fallback SVG)
+    // 로고 (한글 팀명 URL 안전 인코딩 + 로드 실패 시 fallback 텍스트 원)
     const awayLogoEl = document.getElementById('away-logo');
     const homeLogoEl = document.getElementById('home-logo');
     const logoFallback = (team) => {
@@ -609,6 +714,8 @@ function updateScoreUI(s) {
     show('game-time');
     statusBadge.textContent = `● ${s.inning}`;
     statusBadge.className = 'status-badge badge-live';
+    // 라이브: 폴링 시작 (앱 startScoreLoop 등가물)
+    startRefreshLoop();
   } else if (s.status === '2') {
     // 경기 종료
     awayScoreEl.textContent = s.away_score; show('away-score');
@@ -619,6 +726,18 @@ function updateScoreUI(s) {
     hide('game-time');
     statusBadge.textContent = '경기종료';
     statusBadge.className = 'status-badge badge-ended';
+    stopRefreshLoop();
+  } else if (s.status === '3') {
+    // 우천취소 (경기취소) — 앱 0526d56 동기화. 점수 숨기고 취소 배지 + 시작 시간 숨김
+    hide('away-score'); hide('home-score');
+    const cancelText = s.inning && s.inning.length > 0 ? s.inning : '우천취소';
+    badge.textContent = cancelText;
+    badge.className = 'inning-badge badge-cancel';
+    show('center-badge');
+    hide('game-time');  // 예정 오인 방지
+    statusBadge.textContent = cancelText;
+    statusBadge.className = 'status-badge badge-cancel';
+    stopRefreshLoop();
   }
 }
 
@@ -748,6 +867,18 @@ function hide(id) {
   const el = document.getElementById(id);
   if (el) el.classList.add('hidden');
 }
+
+// 페이지 가시성 변화 시 폴링 제어 — 백그라운드(다른 탭/잠금) 가면 중지, 복귀 시 즉시 갱신.
+// 모바일 배터리·네트워크 보호 + 복귀 시 stale 점수 빠른 갱신.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopRefreshLoop();
+  } else {
+    // 포커스 복귀 시 즉시 한번 갱신, 라이브면 폴링 재시작은 updateScoreUI에서.
+    loadScores();
+    loadPitcher();
+  }
+});
 
 // 초기 로드
 loadAll();
