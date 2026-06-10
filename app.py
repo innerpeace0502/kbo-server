@@ -1366,6 +1366,12 @@ def morning_schedule_fetch():
             print(f"[scheduler] morning 선발 갱신 오류: {e}")
 
         if not games:
+            # ✅ 휴식일엔 남아있을 수 있는 stale game_* 잡도 정리.
+            # 새벽 0~4시 재배포 시 _boot_warm이 '어제'(get_game_date) 일정 기준으로
+            # 예약한 잡이 남아, 휴식일 저녁에 Chrome이 헛돌이로 켜지는 것 방지
+            # (02:00 하드캡까지 최대 ~9.5h 낭비되던 시나리오).
+            schedule.clear('game_start_once')
+            schedule.clear('game_stop_once')
             print(f"[scheduler] {today} 경기 없음 - 휴식일, 다음 03:55까지 대기")
         else:
             first_start = _parse_first_game_time(games, today)
@@ -2148,8 +2154,17 @@ def recent_games():
 
 @app.route('/api/debug/scores')
 def debug_scores():
-    """스코어 디버그용 - 캐시 무시하고 새로 조회"""
-    scores = get_live_scores(force=True)
+    """스코어 디버그용 - 캐시 무시하고 새로 조회.
+    절전 중 호출되면 Chrome을 잠깐 켰다가 반드시 끈다 — 가드 없이는 _fetch_body_text가
+    ChromeManager 몰래 드라이버를 띄워 다음 game_mode/morning까지 ~800MB가 방치됐다."""
+    was_active = chrome.is_active()
+    if not was_active:
+        chrome.start("debug_scores")
+    try:
+        scores = get_live_scores(force=True)
+    finally:
+        if not was_active:
+            chrome.stop("debug_scores_done")
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
 
 
@@ -2230,36 +2245,44 @@ def debug_raw():
     """진단용: KBO 페이지 raw 라인 덤프 (우천취소 등 파싱 디버깅).
     kind=gamecenter (기본): GameCenter 페이지 / kind=ranking: 팀순위 페이지.
     Selenium으로 받은 body 텍스트를 줄 단위로 그대로 반환하여
-    실제 텍스트 구조와 파싱 로직 불일치를 진단한다."""
+    실제 텍스트 구조와 파싱 로직 불일치를 진단한다.
+    절전 중 호출되면 Chrome을 잠깐 켰다가 반드시 끈다 (유령 Chrome 방치 방지)."""
     kind = request.args.get('kind', 'gamecenter')
     today = get_game_date()
-    if kind in ('ranking', 'ranking_pc', 'ranking_mobile'):
-        # ranking(기본)·ranking_pc → PC 페이지, ranking_mobile → 모바일 페이지.
-        # KBO 모바일 페이지가 올스타 투표 등으로 임시 교체될 때 비교 진단용.
-        url = (
-            'https://m.koreabaseball.com/Kbo/TeamRank.aspx'
-            if kind == 'ranking_mobile'
-            else 'https://www.koreabaseball.com/Record/TeamRank/TeamRankDaily.aspx'
-        )
-        body = _fetch_body_text(
-            url,
-            wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
-        )
+    was_active = chrome.is_active()
+    if not was_active:
+        chrome.start("debug_raw")
+    try:
+        if kind in ('ranking', 'ranking_pc', 'ranking_mobile'):
+            # ranking(기본)·ranking_pc → PC 페이지, ranking_mobile → 모바일 페이지.
+            # KBO 모바일 페이지가 올스타 투표 등으로 임시 교체될 때 비교 진단용.
+            url = (
+                'https://m.koreabaseball.com/Kbo/TeamRank.aspx'
+                if kind == 'ranking_mobile'
+                else 'https://www.koreabaseball.com/Record/TeamRank/TeamRankDaily.aspx'
+            )
+            body = _fetch_body_text(
+                url,
+                wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
+            )
+            lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
+            return jsonify({
+                'kind': kind, 'url': url, 'today': today,
+                'body_is_none': body is None,
+                'line_count': len(lines), 'lines': lines,
+            })
+        # gamecenter (기본)
+        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+        body = _fetch_body_text(url, wait_patterns=[r'경기예정', r'경기종료', r'\d+회[초말]'])
         lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
         return jsonify({
-            'kind': kind, 'url': url, 'today': today,
+            'kind': 'gamecenter', 'today': today,
             'body_is_none': body is None,
             'line_count': len(lines), 'lines': lines,
         })
-    # gamecenter (기본)
-    url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-    body = _fetch_body_text(url, wait_patterns=[r'경기예정', r'경기종료', r'\d+회[초말]'])
-    lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
-    return jsonify({
-        'kind': 'gamecenter', 'today': today,
-        'body_is_none': body is None,
-        'line_count': len(lines), 'lines': lines,
-    })
+    finally:
+        if not was_active:
+            chrome.stop("debug_raw_done")
 
 
 # ─────────────────────────────────────────
