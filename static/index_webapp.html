@@ -519,16 +519,21 @@ const TEAM_COLORS = {
   '한화': '#FF6600', '키움': '#820024'
 };
 
-// 자동 갱신 폴링 — 앱 SCORE_REFRESH_INTERVAL=30000과 동일.
-// 라이브 중(status=1)에만 폴링, 종료/취소(2/3)면 중지.
-const REFRESH_INTERVAL = 30 * 1000;
+// 자동 갱신 폴링 — 라이브 30초(앱 SCORE_REFRESH_INTERVAL과 동일), 경기 전 60초.
+// 경기 전 폴링은 라이브 전환 감시용: 이전엔 status=1을 본 뒤에야 폴링이 시작돼
+// 경기 전에 열어둔 화면이 경기가 시작돼도 안 바뀌었다. 종료/취소(2/3)면 중지.
+const REFRESH_INTERVAL_LIVE = 30 * 1000;
+const REFRESH_INTERVAL_PRE  = 60 * 1000;
 let refreshTimer = null;
-function startRefreshLoop() {
-  if (refreshTimer) return;
-  refreshTimer = setInterval(() => { loadScores(); loadPitcher(); }, REFRESH_INTERVAL);
+let refreshIntervalMs = 0;
+function startRefreshLoop(ms) {
+  if (refreshTimer && refreshIntervalMs === ms) return;
+  stopRefreshLoop();
+  refreshIntervalMs = ms;
+  refreshTimer = setInterval(() => { loadScores(); loadPitcher(); }, ms);
 }
 function stopRefreshLoop() {
-  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; refreshIntervalMs = 0; }
 }
 
 // URL 파라미터 우선, 없으면 localStorage (Glimpse2 등 외부 앱 지원)
@@ -538,6 +543,8 @@ let state = {
   team: _urlParams.get('team') || localStorage.getItem('kbo_team') || '',
   iptv: _urlParams.get('iptv') || localStorage.getItem('kbo_iptv') || '',
   away: '', home: '',
+  gameTime: '',       // 오늘 경기 시작 시각 (status=0 표시·폴링용)
+  isTomorrow: false,  // 내일/다음 경기 표시 중이면 폴링 불필요
   rankingCache: null,
   rankingTime: 0,
 };
@@ -609,6 +616,8 @@ async function loadAll() {
     const game = games[0];
     state.away = game.away;
     state.home = game.home;
+    state.gameTime = game.time || '';
+    state.isTomorrow = isTomorrow;
 
     // 기본 정보 세팅
     document.getElementById('game-date').textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
@@ -642,10 +651,10 @@ async function loadAll() {
     hide('loading');
     show('game-info');
 
-    // 경기예정 초기 상태 (VS)
-    if (isTomorrow) {
-      setPreState(game.time);
-    }
+    // 경기예정 초기 상태 (VS + 시작시간) — 오늘 경기도 우선 표시.
+    // 라이브/종료면 loadScores 응답이 곧바로 덮어쓴다.
+    // (이전엔 내일 경기만 표시해서, 오늘 경기 시작 전엔 VS·시작시간이 안 보였음)
+    setPreState(game.time);
 
     // 병렬 로드
     Promise.all([
@@ -694,7 +703,11 @@ async function loadScores() {
       (x.away === state.away && x.home === state.home) ||
       (x.away === state.home && x.home === state.away)
     );
-    if (!s) return;
+    if (!s) {
+      // 오늘 경기인데 스코어 데이터가 아직 없으면(이른 아침 등) 60초 폴링으로 전환 감시
+      if (!state.isTomorrow) startRefreshLoop(REFRESH_INTERVAL_PRE);
+      return;
+    }
     updateScoreUI(s);
   } catch(e) { console.warn('스코어 오류', e); }
 }
@@ -717,7 +730,12 @@ function updateScoreUI(s) {
     statusBadge.textContent = `● ${s.inning}`;
     statusBadge.className = 'status-badge badge-live';
     // 라이브: 폴링 시작 (앱 startScoreLoop 등가물)
-    startRefreshLoop();
+    startRefreshLoop(REFRESH_INTERVAL_LIVE);
+  } else if (s.status === '0') {
+    // 경기 예정(오늘) — VS + 시작시간 표시 + 60초 폴링으로 라이브 전환 자동 감지
+    hide('away-score'); hide('home-score');
+    setPreState(state.gameTime);
+    startRefreshLoop(REFRESH_INTERVAL_PRE);
   } else if (s.status === '2') {
     // 경기 종료
     awayScoreEl.textContent = s.away_score; show('away-score');
