@@ -1243,7 +1243,9 @@ def _bg_refresh_loop():
             hour = now_kst.hour
             # 경기 시간대: KST 14시~다음날 2시
             in_game_hours = (14 <= hour <= 23) or (hour < 2)
-            interval = 45 if in_game_hours else 300
+            # 30초: warm 사이클이 경량화(순위 TTL·recent 제거)되어 가능해진 주기.
+            # 라이브 체감 지연 = 서버 주기 + 클라 폴링(30s) → 평균 ~37s에서 ~27s로 단축.
+            interval = 30 if in_game_hours else 300
             _warm_caches_once()
         except Exception as e:
             print(f"[prewarm loop 오류] {e}")
@@ -1268,7 +1270,7 @@ def _start_background():
 # Chrome 절전 모드 스케줄러
 #
 # 매일 03:55에 morning_schedule_fetch()를 자동 실행하여 오늘 경기 일정을 받고
-# 첫 경기 -2h05m에 start_game_mode, +5m에 stop_game_mode를 예약한다.
+# 첫 경기 -1h05m에 start_game_mode, +5m에 stop_game_mode를 예약한다.
 #
 # CHROME_ALWAYS_ON=true에서는 _start_scheduler()가 no-op (스케줄러 미기동).
 # TEST_MODE=true에서는 트리거 시각을 가까운 미래로 재배치하여 5분 안에 전 사이클 시연.
@@ -1370,9 +1372,9 @@ def morning_schedule_fetch():
             last_end = _estimate_last_game_end(games, today)
             if first_start and last_end:
                 _schedule_game_mode(first_start, last_end)
-                start_at = (first_start - timedelta(hours=2, minutes=5)).strftime('%H:%M')
+                start_at = (first_start - timedelta(hours=1, minutes=5)).strftime('%H:%M')
                 stop_at = (last_end + timedelta(minutes=5)).strftime('%H:%M')
-                print(f"[scheduler] 게임 모드 예약: ON {start_at} (첫경기 -2h05m) / OFF {stop_at} (마지막 +5m)")
+                print(f"[scheduler] 게임 모드 예약: ON {start_at} (첫경기 -1h05m) / OFF {stop_at} (마지막 +5m)")
             else:
                 print(f"[scheduler] {today} 경기 시각 파싱 실패 - 게임 모드 예약 생략")
     except Exception as e:
@@ -1382,7 +1384,7 @@ def morning_schedule_fetch():
 
 
 def start_game_mode():
-    """첫 경기 -2h05m 트리거. Chrome ON 마킹. _bg_refresh_loop가 활성화됨."""
+    """첫 경기 -1h05m 트리거. Chrome ON 마킹. _bg_refresh_loop가 활성화됨."""
     chrome.start("game_mode")
     print(f"[scheduler] 게임 모드 시작 - 실시간 스크래핑 ON")
     return schedule.CancelJob  # 일회성 (다음 날 morning_schedule_fetch가 재예약)
@@ -1427,8 +1429,12 @@ def stop_game_mode():
 
 
 def _schedule_game_mode(first_game_kst, last_game_kst):
-    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반, KST 기준)."""
-    start_at = (first_game_kst - timedelta(hours=2, minutes=5)).strftime('%H:%M')
+    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반, KST 기준).
+
+    시작 오프셋 -1h05m: 선발투수는 03:55 morning fetch가 이미 디스크에 저장하므로
+    -2h05m까지 일찍 켤 필요 없음. 1시간 단축 = Chrome ON 메모리 비용 일 1시간 절감.
+    """
+    start_at = (first_game_kst - timedelta(hours=1, minutes=5)).strftime('%H:%M')
     stop_at = (last_game_kst + timedelta(minutes=5)).strftime('%H:%M')
     schedule.clear('game_start_once')
     schedule.clear('game_stop_once')
@@ -1775,7 +1781,7 @@ def _boot_warm():
     라이브 갱신이 멈추던 공백을 방지한다.
 
     - 기본: Chrome을 잠깐 켜 데이터를 받아 캐시·디스크에 저장한 뒤 다시 끈다.
-    - 부팅 시점이 game_mode 시간대(첫경기 -2h05m ~ 마지막 +5m)이면 Chrome을 유지하고
+    - 부팅 시점이 game_mode 시간대(첫경기 -1h05m ~ 마지막 +5m)이면 Chrome을 유지하고
       game_mode를 재예약해 라이브 갱신을 즉시 복구한다.
       (게임 도중 재시작이 라이브를 끊지 않게 하는 핵심 가드.)"""
     if _CHROME_ALWAYS_ON:
@@ -1816,7 +1822,7 @@ def _boot_warm():
                 if first_start and last_end:
                     _schedule_game_mode(first_start, last_end)
                     now_kst = datetime.now(KST)
-                    win_start = first_start - timedelta(hours=2, minutes=5)
+                    win_start = first_start - timedelta(hours=1, minutes=5)
                     win_end = last_end + timedelta(minutes=5)
                     if win_start <= now_kst <= win_end:
                         keep_chrome = True
