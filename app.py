@@ -1205,20 +1205,19 @@ def _warm_caches_once():
             except Exception as e:
                 print(f"[prewarm gameinfo 오류] {e}")
 
+        # 순위: force 없이 TTL(10분) 준수 — 순위는 다른 경기가 끝날 때만 바뀌므로
+        # 매 사이클 Selenium 재로드(일 ~550회)는 낭비. 10분 1회로도 저녁 중간 변동 반영 충분.
+        # 오늘 전 경기 결과가 반영된 '최종' 순위는 stop_game_mode가 OFF 직전 확정 저장.
         try:
-            ranking_data = get_team_ranking(force=True)
+            ranking_data = get_team_ranking()
             if ranking_data:
                 _save_disk_cache('ranking', ranking_data)  # 절전 모드 fallback용
         except Exception as e:
             print(f"[prewarm ranking 오류] {e}")
 
-        for team in KBO_TEAMS:
-            try:
-                recent_data = get_recent_games(team, force=True)
-                if recent_data:
-                    _save_disk_cache(f'recent_{team}', recent_data)  # 팀별 디스크 저장
-            except Exception as e:
-                print(f"[prewarm recent {team} 오류] {e}")
+        # 최근 10경기: 사이클에서 제거 — 경기 종료 시에만 바뀌는 데이터를
+        # 45초마다 10팀×2개월 POST(일 ~11,000회)로 받던 것이 최대 낭비 + KBO 차단 위험.
+        # stop_game_mode(종료 시)·_boot_warm(부팅 시)이 채우고, 요청 시엔 TTL fallback(HTTP라 가벼움).
 
         try:
             _save_pitcher_disk_cache(today)   # 선발투수 절전 fallback용
@@ -1407,6 +1406,20 @@ def stop_game_mode():
                 return schedule.CancelJob
         except Exception as e:
             print(f"[scheduler] stop_game_mode 종료확인 오류: {e}")
+    # ✅ OFF 확정 후 마지막 1회: 오늘 결과가 반영된 최종 순위/최근경기를 받아 디스크 저장.
+    # 절전 시간(밤~다음날)에 캐시로 응답할 데이터를 최신화하는 단 한 번의 기회.
+    # (KBO 페이지 갱신이 늦어 일부 누락돼도 03:55 morning fetch가 안전망으로 보정.)
+    try:
+        rk = get_team_ranking(force=True)
+        if rk:
+            _save_disk_cache('ranking', rk)
+        for t in KBO_TEAMS:
+            rc = get_recent_games(t, force=True)
+            if rc:
+                _save_disk_cache(f'recent_{t}', rc)
+        print("[scheduler] 종료 확정 - 최종 순위/최근경기 디스크 저장 완료")
+    except Exception as e:
+        print(f"[scheduler] 최종 순위/최근경기 저장 오류: {e}")
     chrome.stop("game_mode_end")
     print(f"[scheduler] 게임 모드 종료 - Chrome OFF")
     _reschedule_next_morning()
