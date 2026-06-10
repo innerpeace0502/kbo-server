@@ -1205,20 +1205,19 @@ def _warm_caches_once():
             except Exception as e:
                 print(f"[prewarm gameinfo 오류] {e}")
 
+        # 순위: force 없이 TTL(10분) 준수 — 순위는 다른 경기가 끝날 때만 바뀌므로
+        # 매 사이클 Selenium 재로드(일 ~550회)는 낭비. 10분 1회로도 저녁 중간 변동 반영 충분.
+        # 오늘 전 경기 결과가 반영된 '최종' 순위는 stop_game_mode가 OFF 직전 확정 저장.
         try:
-            ranking_data = get_team_ranking(force=True)
+            ranking_data = get_team_ranking()
             if ranking_data:
                 _save_disk_cache('ranking', ranking_data)  # 절전 모드 fallback용
         except Exception as e:
             print(f"[prewarm ranking 오류] {e}")
 
-        for team in KBO_TEAMS:
-            try:
-                recent_data = get_recent_games(team, force=True)
-                if recent_data:
-                    _save_disk_cache(f'recent_{team}', recent_data)  # 팀별 디스크 저장
-            except Exception as e:
-                print(f"[prewarm recent {team} 오류] {e}")
+        # 최근 10경기: 사이클에서 제거 — 경기 종료 시에만 바뀌는 데이터를
+        # 45초마다 10팀×2개월 POST(일 ~11,000회)로 받던 것이 최대 낭비 + KBO 차단 위험.
+        # stop_game_mode(종료 시)·_boot_warm(부팅 시)이 채우고, 요청 시엔 TTL fallback(HTTP라 가벼움).
 
         try:
             _save_pitcher_disk_cache(today)   # 선발투수 절전 fallback용
@@ -1244,7 +1243,9 @@ def _bg_refresh_loop():
             hour = now_kst.hour
             # 경기 시간대: KST 14시~다음날 2시
             in_game_hours = (14 <= hour <= 23) or (hour < 2)
-            interval = 45 if in_game_hours else 300
+            # 30초: warm 사이클이 경량화(순위 TTL·recent 제거)되어 가능해진 주기.
+            # 라이브 체감 지연 = 서버 주기 + 클라 폴링(30s) → 평균 ~37s에서 ~27s로 단축.
+            interval = 30 if in_game_hours else 300
             _warm_caches_once()
         except Exception as e:
             print(f"[prewarm loop 오류] {e}")
@@ -1269,7 +1270,7 @@ def _start_background():
 # Chrome 절전 모드 스케줄러
 #
 # 매일 03:55에 morning_schedule_fetch()를 자동 실행하여 오늘 경기 일정을 받고
-# 첫 경기 -2h05m에 start_game_mode, +5m에 stop_game_mode를 예약한다.
+# 첫 경기 -1h05m에 start_game_mode, +5m에 stop_game_mode를 예약한다.
 #
 # CHROME_ALWAYS_ON=true에서는 _start_scheduler()가 no-op (스케줄러 미기동).
 # TEST_MODE=true에서는 트리거 시각을 가까운 미래로 재배치하여 5분 안에 전 사이클 시연.
@@ -1365,15 +1366,21 @@ def morning_schedule_fetch():
             print(f"[scheduler] morning 선발 갱신 오류: {e}")
 
         if not games:
+            # ✅ 휴식일엔 남아있을 수 있는 stale game_* 잡도 정리.
+            # 새벽 0~4시 재배포 시 _boot_warm이 '어제'(get_game_date) 일정 기준으로
+            # 예약한 잡이 남아, 휴식일 저녁에 Chrome이 헛돌이로 켜지는 것 방지
+            # (02:00 하드캡까지 최대 ~9.5h 낭비되던 시나리오).
+            schedule.clear('game_start_once')
+            schedule.clear('game_stop_once')
             print(f"[scheduler] {today} 경기 없음 - 휴식일, 다음 03:55까지 대기")
         else:
             first_start = _parse_first_game_time(games, today)
             last_end = _estimate_last_game_end(games, today)
             if first_start and last_end:
                 _schedule_game_mode(first_start, last_end)
-                start_at = (first_start - timedelta(hours=2, minutes=5)).strftime('%H:%M')
+                start_at = (first_start - timedelta(hours=1, minutes=5)).strftime('%H:%M')
                 stop_at = (last_end + timedelta(minutes=5)).strftime('%H:%M')
-                print(f"[scheduler] 게임 모드 예약: ON {start_at} (첫경기 -2h05m) / OFF {stop_at} (마지막 +5m)")
+                print(f"[scheduler] 게임 모드 예약: ON {start_at} (첫경기 -1h05m) / OFF {stop_at} (마지막 +5m)")
             else:
                 print(f"[scheduler] {today} 경기 시각 파싱 실패 - 게임 모드 예약 생략")
     except Exception as e:
@@ -1383,7 +1390,7 @@ def morning_schedule_fetch():
 
 
 def start_game_mode():
-    """첫 경기 -2h05m 트리거. Chrome ON 마킹. _bg_refresh_loop가 활성화됨."""
+    """첫 경기 -1h05m 트리거. Chrome ON 마킹. _bg_refresh_loop가 활성화됨."""
     chrome.start("game_mode")
     print(f"[scheduler] 게임 모드 시작 - 실시간 스크래핑 ON")
     return schedule.CancelJob  # 일회성 (다음 날 morning_schedule_fetch가 재예약)
@@ -1407,6 +1414,20 @@ def stop_game_mode():
                 return schedule.CancelJob
         except Exception as e:
             print(f"[scheduler] stop_game_mode 종료확인 오류: {e}")
+    # ✅ OFF 확정 후 마지막 1회: 오늘 결과가 반영된 최종 순위/최근경기를 받아 디스크 저장.
+    # 절전 시간(밤~다음날)에 캐시로 응답할 데이터를 최신화하는 단 한 번의 기회.
+    # (KBO 페이지 갱신이 늦어 일부 누락돼도 03:55 morning fetch가 안전망으로 보정.)
+    try:
+        rk = get_team_ranking(force=True)
+        if rk:
+            _save_disk_cache('ranking', rk)
+        for t in KBO_TEAMS:
+            rc = get_recent_games(t, force=True)
+            if rc:
+                _save_disk_cache(f'recent_{t}', rc)
+        print("[scheduler] 종료 확정 - 최종 순위/최근경기 디스크 저장 완료")
+    except Exception as e:
+        print(f"[scheduler] 최종 순위/최근경기 저장 오류: {e}")
     chrome.stop("game_mode_end")
     print(f"[scheduler] 게임 모드 종료 - Chrome OFF")
     _reschedule_next_morning()
@@ -1414,8 +1435,12 @@ def stop_game_mode():
 
 
 def _schedule_game_mode(first_game_kst, last_game_kst):
-    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반, KST 기준)."""
-    start_at = (first_game_kst - timedelta(hours=2, minutes=5)).strftime('%H:%M')
+    """game_start/stop 시각을 schedule에 등록 (일회성, 태그 기반, KST 기준).
+
+    시작 오프셋 -1h05m: 선발투수는 03:55 morning fetch가 이미 디스크에 저장하므로
+    -2h05m까지 일찍 켤 필요 없음. 1시간 단축 = Chrome ON 메모리 비용 일 1시간 절감.
+    """
+    start_at = (first_game_kst - timedelta(hours=1, minutes=5)).strftime('%H:%M')
     stop_at = (last_game_kst + timedelta(minutes=5)).strftime('%H:%M')
     schedule.clear('game_start_once')
     schedule.clear('game_stop_once')
@@ -1762,7 +1787,7 @@ def _boot_warm():
     라이브 갱신이 멈추던 공백을 방지한다.
 
     - 기본: Chrome을 잠깐 켜 데이터를 받아 캐시·디스크에 저장한 뒤 다시 끈다.
-    - 부팅 시점이 game_mode 시간대(첫경기 -2h05m ~ 마지막 +5m)이면 Chrome을 유지하고
+    - 부팅 시점이 game_mode 시간대(첫경기 -1h05m ~ 마지막 +5m)이면 Chrome을 유지하고
       game_mode를 재예약해 라이브 갱신을 즉시 복구한다.
       (게임 도중 재시작이 라이브를 끊지 않게 하는 핵심 가드.)"""
     if _CHROME_ALWAYS_ON:
@@ -1803,7 +1828,7 @@ def _boot_warm():
                 if first_start and last_end:
                     _schedule_game_mode(first_start, last_end)
                     now_kst = datetime.now(KST)
-                    win_start = first_start - timedelta(hours=2, minutes=5)
+                    win_start = first_start - timedelta(hours=1, minutes=5)
                     win_end = last_end + timedelta(minutes=5)
                     if win_start <= now_kst <= win_end:
                         keep_chrome = True
@@ -2129,8 +2154,17 @@ def recent_games():
 
 @app.route('/api/debug/scores')
 def debug_scores():
-    """스코어 디버그용 - 캐시 무시하고 새로 조회"""
-    scores = get_live_scores(force=True)
+    """스코어 디버그용 - 캐시 무시하고 새로 조회.
+    절전 중 호출되면 Chrome을 잠깐 켰다가 반드시 끈다 — 가드 없이는 _fetch_body_text가
+    ChromeManager 몰래 드라이버를 띄워 다음 game_mode/morning까지 ~800MB가 방치됐다."""
+    was_active = chrome.is_active()
+    if not was_active:
+        chrome.start("debug_scores")
+    try:
+        scores = get_live_scores(force=True)
+    finally:
+        if not was_active:
+            chrome.stop("debug_scores_done")
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
 
 
@@ -2211,36 +2245,44 @@ def debug_raw():
     """진단용: KBO 페이지 raw 라인 덤프 (우천취소 등 파싱 디버깅).
     kind=gamecenter (기본): GameCenter 페이지 / kind=ranking: 팀순위 페이지.
     Selenium으로 받은 body 텍스트를 줄 단위로 그대로 반환하여
-    실제 텍스트 구조와 파싱 로직 불일치를 진단한다."""
+    실제 텍스트 구조와 파싱 로직 불일치를 진단한다.
+    절전 중 호출되면 Chrome을 잠깐 켰다가 반드시 끈다 (유령 Chrome 방치 방지)."""
     kind = request.args.get('kind', 'gamecenter')
     today = get_game_date()
-    if kind in ('ranking', 'ranking_pc', 'ranking_mobile'):
-        # ranking(기본)·ranking_pc → PC 페이지, ranking_mobile → 모바일 페이지.
-        # KBO 모바일 페이지가 올스타 투표 등으로 임시 교체될 때 비교 진단용.
-        url = (
-            'https://m.koreabaseball.com/Kbo/TeamRank.aspx'
-            if kind == 'ranking_mobile'
-            else 'https://www.koreabaseball.com/Record/TeamRank/TeamRankDaily.aspx'
-        )
-        body = _fetch_body_text(
-            url,
-            wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
-        )
+    was_active = chrome.is_active()
+    if not was_active:
+        chrome.start("debug_raw")
+    try:
+        if kind in ('ranking', 'ranking_pc', 'ranking_mobile'):
+            # ranking(기본)·ranking_pc → PC 페이지, ranking_mobile → 모바일 페이지.
+            # KBO 모바일 페이지가 올스타 투표 등으로 임시 교체될 때 비교 진단용.
+            url = (
+                'https://m.koreabaseball.com/Kbo/TeamRank.aspx'
+                if kind == 'ranking_mobile'
+                else 'https://www.koreabaseball.com/Record/TeamRank/TeamRankDaily.aspx'
+            )
+            body = _fetch_body_text(
+                url,
+                wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
+            )
+            lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
+            return jsonify({
+                'kind': kind, 'url': url, 'today': today,
+                'body_is_none': body is None,
+                'line_count': len(lines), 'lines': lines,
+            })
+        # gamecenter (기본)
+        url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
+        body = _fetch_body_text(url, wait_patterns=[r'경기예정', r'경기종료', r'\d+회[초말]'])
         lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
         return jsonify({
-            'kind': kind, 'url': url, 'today': today,
+            'kind': 'gamecenter', 'today': today,
             'body_is_none': body is None,
             'line_count': len(lines), 'lines': lines,
         })
-    # gamecenter (기본)
-    url = f'https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}'
-    body = _fetch_body_text(url, wait_patterns=[r'경기예정', r'경기종료', r'\d+회[초말]'])
-    lines = [l.strip() for l in (body or '').split('\n') if l.strip()]
-    return jsonify({
-        'kind': 'gamecenter', 'today': today,
-        'body_is_none': body is None,
-        'line_count': len(lines), 'lines': lines,
-    })
+    finally:
+        if not was_active:
+            chrome.stop("debug_raw_done")
 
 
 # ─────────────────────────────────────────
