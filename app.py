@@ -2329,7 +2329,11 @@ def debug_fetch():
             source, re.IGNORECASE)))
         # KBO gameId 토큰 추출 (단일 경기 URL 구성용)
         gids = sorted(set(re.findall(r'\b(\d{8}[A-Z]{2}[A-Z]{2}\d[A-Z0-9]*)\b', source)))
-        return jsonify({
+        # 중계 데이터 엔드포인트 후보 (relay/livetext AJAX 추적용)
+        endpoints = sorted(set(re.findall(
+            r'(/ws/[A-Za-z./]+|/Game/[A-Za-z./]+|Get[A-Za-z]*(?:Game|Relay|Live|Text|Score)[A-Za-z]*|RelayText|LiveText)',
+            source)))
+        result = {
             'url': url, 'wait_s': wait_s,
             'line_count': len(lines), 'lines': lines,
             'source_len': len(source),
@@ -2337,7 +2341,22 @@ def debug_fetch():
             'classes_matched': cls[:50],
             'imgs_matched': imgs[:30],
             'gameids': gids[:20],
-        })
+            'endpoints': endpoints[:40],
+        }
+        # find=정규식 → source에서 매칭 주변 120자 윈도 반환 (relay/주자/아웃 위치 추적)
+        find = request.args.get('find', '')
+        if find:
+            try:
+                wins = []
+                for m in re.finditer(find, source, re.IGNORECASE):
+                    s = max(0, m.start() - 60)
+                    wins.append(source[s:m.end() + 60].replace('\n', ' ').replace('\r', ' '))
+                    if len(wins) >= 25:
+                        break
+                result['find_windows'] = wins
+            except Exception as e:
+                result['find_error'] = str(e)
+        return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
