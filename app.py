@@ -2285,6 +2285,66 @@ def debug_raw():
             chrome.stop("debug_raw_done")
 
 
+@app.route('/api/debug/fetch')
+def debug_fetch():
+    """진단용: 임의의 KBO 페이지를 Selenium으로 로드해 body 텍스트 + HTML 구조 조사.
+    문자중계(아웃카운트·주자)가 글자인지 그림(이미지/CSS 클래스)인지 판별용.
+    koreabaseball.com 도메인만 허용. 절전 중이면 chrome 가드로 켰다 끈다.
+    쿼리: url(필수, koreabaseball.com), wait(렌더 대기 초, 기본 3)."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    url = request.args.get('url', '')
+    if 'koreabaseball.com' not in url:
+        return jsonify({'error': 'koreabaseball.com URL만 허용'}), 400
+    try:
+        wait_s = float(request.args.get('wait', '3'))
+    except Exception:
+        wait_s = 3.0
+    # 아웃/주자/볼카운트가 텍스트로 있는지 확인할 탐침 키워드
+    probes = ['아웃', '주자', '볼', '스트라이크', '1루', '2루', '3루', '만루',
+              'out', 'base', 'ball', 'strike', 'bso', 'count', 'diamond', 'runner']
+    was_active = chrome.is_active()
+    if not was_active:
+        chrome.start("debug_fetch")
+    try:
+        with _driver_lock:
+            driver = _ensure_driver()
+            driver.get(url)
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located((By.TAG_NAME, 'body')))
+            time_module.sleep(wait_s)  # JS 렌더(문자중계 AJAX) 여유
+            body_text = driver.find_element(By.TAG_NAME, 'body').text
+            source = driver.page_source
+        lines = [l.strip() for l in body_text.split('\n') if l.strip()]
+        src_low = source.lower()
+        probe_hits = {p: (p.lower() in src_low) for p in probes}
+        # 아웃/주자 관련 class·id 이름 (그래픽일 경우 여기서 드러남)
+        cls = sorted(set(re.findall(
+            r'(?:class|id)="([^"]*(?:base|out|bso|ball|strike|count|diamond|runner|inning)[^"]*)"',
+            source, re.IGNORECASE)))
+        # 아웃/주자 관련 이미지·svg 경로
+        imgs = sorted(set(re.findall(
+            r'(?:src|href)="([^"]*(?:base|out|diamond|runner|bso)[^"]*)"',
+            source, re.IGNORECASE)))
+        # KBO gameId 토큰 추출 (단일 경기 URL 구성용)
+        gids = sorted(set(re.findall(r'\b(\d{8}[A-Z]{2}[A-Z]{2}\d[A-Z0-9]*)\b', source)))
+        return jsonify({
+            'url': url, 'wait_s': wait_s,
+            'line_count': len(lines), 'lines': lines,
+            'source_len': len(source),
+            'probe_hits': probe_hits,
+            'classes_matched': cls[:50],
+            'imgs_matched': imgs[:30],
+            'gameids': gids[:20],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if not was_active:
+            chrome.stop("debug_fetch_done")
+
+
 # ─────────────────────────────────────────
 # 모듈 로드 시점에 프리워밍 스레드 기동
 # (gunicorn/waitress 환경 포함. dev의 리로더는 use_reloader=False로 회피)
