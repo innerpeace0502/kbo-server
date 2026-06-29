@@ -75,6 +75,22 @@ _TTL_PITCHER     = 3600  # 선발투수 캐시 1시간
 _pitcher_cache      = {}
 _pitcher_cache_time = {}
 
+# ── 경기 상황(아웃카운트·볼카운트·주자) — ScoreBoard.aspx ──
+# 카운트는 body 텍스트 "1-1 0out", 주자는 HTML base_on.png. 5경기 한 페이지.
+_SCOREBOARD_URL       = 'https://www.koreabaseball.com/Schedule/ScoreBoard.aspx'
+_situation_cache      = {}   # {(away, home): {balls, strikes, outs, bases:[b1,b2,b3]}}
+_situation_cache_time = 0
+_TTL_SITUATION        = 25
+# body 텍스트의 카운트 줄: "1-1 0out" = {볼}-{스트라이크} {아웃}out
+_SB_COUNT_RE = re.compile(r'^(\d)-(\d)\s+(\d)\s*out$')
+# HTML의 게임별 블록: base1/2/3 이미지(base_on.png=주자) + 카운트 <p>1-1 <span>0</span>out
+_SB_BASE_RE = re.compile(
+    r'class="base1"><img src="([^"]+)"[^>]*?alt="1루">.*?'
+    r'class="base2"><img src="([^"]+)"[^>]*?alt="2루">.*?'
+    r'class="base3"><img src="([^"]+)"[^>]*?alt="3루">.*?'
+    r'<p>(\d)-(\d)\s*<span>(\d)</span>\s*out',
+    re.DOTALL)
+
 
 def _save_scores_persist(scores, date_str):
     """경기 종료 스코어를 파일에 저장 (Railway 재시작 후 복원용)."""
@@ -475,6 +491,111 @@ def _fetch_body_text(url, wait_patterns=None, max_wait=12):
             return None
 
 
+def _fetch_body_and_source(url, wait_patterns=None, max_wait=12):
+    """_fetch_body_text와 동일하되 (body_text, page_source) 튜플 반환.
+    주자(베이스)처럼 텍스트가 아닌 HTML 구조(이미지/클래스)를 봐야 하는 파싱용."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    def _do_fetch(driver):
+        driver.get(url)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body')))
+        if wait_patterns:
+            compiled = [re.compile(p) for p in wait_patterns]
+
+            def _ready(d):
+                try:
+                    t = d.find_element(By.TAG_NAME, 'body').text
+                except Exception:
+                    return False
+                return any(r.search(t) for r in compiled)
+
+            try:
+                WebDriverWait(driver, max_wait).until(_ready)
+            except Exception:
+                pass
+        return driver.find_element(By.TAG_NAME, 'body').text, driver.page_source
+
+    with _driver_lock:
+        try:
+            driver = _ensure_driver()
+            return _do_fetch(driver)
+        except Exception as e:
+            print(f"[Selenium(source) 1차 실패] {e}")
+
+        global _driver
+        if _driver is not None:
+            try:
+                _driver.quit()
+            except Exception:
+                pass
+            _driver = None
+        try:
+            driver = _ensure_driver()
+            return _do_fetch(driver)
+        except Exception as e:
+            print(f"[Selenium(source) 2차 실패] {e}")
+            return None, None
+
+
+def _get_scoreboard_situations(force=False):
+    """ScoreBoard.aspx → {(away,home): {balls,strikes,outs,bases:[1루,2루,3루]}}.
+    라이브 경기의 아웃/볼카운트/주자 표시용. 5경기가 한 페이지에 있어 사이클당 1회 로드.
+    카운트는 body 텍스트(신뢰), 주자는 HTML(base_on.png). 양쪽 순서를 카운트 체크섬으로 대조."""
+    global _situation_cache, _situation_cache_time
+    now = time_module.time()
+    if not force and _situation_cache and now - _situation_cache_time < _TTL_SITUATION:
+        return _situation_cache
+
+    try:
+        body, source = _fetch_body_and_source(_SCOREBOARD_URL, wait_patterns=[r'\dout'])
+    except Exception as e:
+        print(f"[situation fetch 오류] {e}")
+        return _situation_cache
+    if not body or not source:
+        return _situation_cache
+
+    # 1) body 텍스트 → 순서대로 (away, home, B, S, O)
+    # 라이브 경기 블록: [away score] / [이닝] / [score home] / [B-S Out] / [구장 시간] ...
+    lines = [l.strip() for l in body.split('\n') if l.strip()]
+    text_games = []
+    for idx, ln in enumerate(lines):
+        m = _SB_COUNT_RE.match(ln)
+        if not m or idx < 3:
+            continue
+        away_tok = lines[idx - 3].split()   # "KIA 0"  → away
+        home_tok = lines[idx - 1].split()   # "1 두산" → home
+        away = away_tok[0] if away_tok and away_tok[0] in KBO_TEAMS else None
+        home = home_tok[-1] if home_tok and home_tok[-1] in KBO_TEAMS else None
+        if away and home:
+            text_games.append({
+                'away': away, 'home': home,
+                'balls': int(m.group(1)), 'strikes': int(m.group(2)), 'outs': int(m.group(3)),
+            })
+
+    # 2) HTML → 순서대로 (base1,base2,base3 src, B, S, O)
+    html_blocks = _SB_BASE_RE.findall(source)
+
+    # 3) index zip + 카운트 체크섬으로 주자 부착 (순서 어긋남 방지)
+    result = {}
+    for i, g in enumerate(text_games):
+        bases = [False, False, False]
+        if i < len(html_blocks):
+            b1, b2, b3, hb, hs, ho = html_blocks[i]
+            if (int(hb), int(hs), int(ho)) == (g['balls'], g['strikes'], g['outs']):
+                bases = ['base_on' in b1, 'base_on' in b2, 'base_on' in b3]
+        info = {'balls': g['balls'], 'strikes': g['strikes'], 'outs': g['outs'], 'bases': bases}
+        result[(g['away'], g['home'])] = info
+        result[(g['home'], g['away'])] = info  # 양방향 키 (응답 순서 차이 대비)
+
+    if result:
+        _situation_cache = result
+        _situation_cache_time = time_module.time()
+    return result
+
+
 # ─────────────────────────────────────────
 # 스케줄 API 호출 (월별 캐시)
 # ─────────────────────────────────────────
@@ -791,6 +912,23 @@ def get_live_scores(force=False):
                 else s
                 for s in scores
             ]
+
+        # 라이브 경기에 아웃/볼카운트/주자(베이스) 상황 부착.
+        # ScoreBoard.aspx를 사이클당 1회 로드(라이브 있을 때만). 기존 키는 그대로 두고 새 키만 추가.
+        if any(s.get('status') == '1' for s in scores):
+            try:
+                sit = _get_scoreboard_situations(force=force)
+                for s in scores:
+                    if s.get('status') != '1':
+                        continue
+                    info = sit.get((s['away'], s['home']))
+                    if info:
+                        s['balls']   = info['balls']
+                        s['strikes'] = info['strikes']
+                        s['outs']    = info['outs']
+                        s['bases']   = info['bases']
+            except Exception as e:
+                print(f"[situation 부착 오류] {e}")
 
         _scores_cache      = scores
         _scores_cache_time = time_module.time()
