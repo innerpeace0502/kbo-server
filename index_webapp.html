@@ -216,6 +216,27 @@ body {
 .pitcher-name { font-size: 12px; color: #CCC; }
 .pitcher-sep  { font-size: 10px; color: #444; }
 
+/* ── 경기 상황(아웃·볼카운트·주자) — status=1에만 표시 ── */
+.situation-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: #11202F;
+  border: 1px solid #1E3A52;
+  border-radius: 12px;
+  padding: 9px 14px;
+  margin-bottom: 12px;
+}
+.sit-counts { display: flex; flex-direction: column; gap: 5px; }
+.sit-row { display: flex; align-items: center; gap: 6px; }
+.sit-label { font-size: 11px; color: #7FA0C0; width: 12px; }
+.sit-dots { display: flex; gap: 6px; }
+.sit-dot { width: 9px; height: 9px; border-radius: 50%; background: #23303C; }
+.sit-dot.on-b { background: #4CD964; }
+.sit-dot.on-s { background: #FFD700; }
+.sit-dot.on-o { background: #FF6B6B; }
+
 /* ── 양팀 순위 카드 (앱 9f72cc3 동기화: 팀명 칩 + 전적 / 큰 순위 숫자 2줄) ──
    윗줄: [팀명 둥근 칩] [전적 작은 글씨]  ← 가로 한 행
    아랫줄: [4위]                          ← 큰 숫자, 좌측 정렬
@@ -446,6 +467,22 @@ body {
           </div>
         </div>
       </div>
+
+      <!-- 경기 상황: 주자 다이아몬드 + B·S·O (status=1에만 표시) -->
+      <div class="situation-bar hidden" id="situation-bar">
+        <svg width="48" height="48" viewBox="0 0 60 60" aria-hidden="true" style="flex-shrink:0;">
+          <polygon id="sit-base2" points="30,8 38,16 30,24 22,16"></polygon>
+          <polygon id="sit-base1" points="44,22 52,30 44,38 36,30"></polygon>
+          <polygon id="sit-base3" points="16,22 24,30 16,38 8,30"></polygon>
+          <polygon points="30,40 35,44 33,50 27,50 25,44" fill="#2A3A4A"></polygon>
+        </svg>
+        <div class="sit-counts">
+          <div class="sit-row"><span class="sit-label">B</span><span class="sit-dots" id="sit-b"></span></div>
+          <div class="sit-row"><span class="sit-label">S</span><span class="sit-dots" id="sit-s"></span></div>
+          <div class="sit-row"><span class="sit-label">O</span><span class="sit-dots" id="sit-o"></span></div>
+        </div>
+      </div>
+
       <div class="card-divider"></div>
       <div class="pitcher-row" id="pitcher-row">
         <div class="pitcher-group" id="away-pitcher"></div>
@@ -729,11 +766,13 @@ function updateScoreUI(s) {
     show('game-time');
     statusBadge.textContent = `● ${s.inning}`;
     statusBadge.className = 'status-badge badge-live';
+    renderSituation(s);  // 주자 다이아몬드 + B·S·O
     // 라이브: 폴링 시작 (앱 startScoreLoop 등가물)
     startRefreshLoop(REFRESH_INTERVAL_LIVE);
   } else if (s.status === '0') {
     // 경기 예정(오늘) — VS + 시작시간 표시 + 60초 폴링으로 라이브 전환 자동 감지
     hide('away-score'); hide('home-score');
+    hide('situation-bar');
     setPreState(state.gameTime);
     startRefreshLoop(REFRESH_INTERVAL_PRE);
   } else if (s.status === '2') {
@@ -744,12 +783,14 @@ function updateScoreUI(s) {
     badge.className = 'inning-badge badge-ended';
     show('center-badge');
     hide('game-time');
+    hide('situation-bar');
     statusBadge.textContent = '경기종료';
     statusBadge.className = 'status-badge badge-ended';
     stopRefreshLoop();
   } else if (s.status === '3') {
     // 우천취소 (경기취소) — 앱 0526d56 동기화. 점수 숨기고 취소 배지 + 시작 시간 숨김
     hide('away-score'); hide('home-score');
+    hide('situation-bar');
     const cancelText = s.inning && s.inning.length > 0 ? s.inning : '우천취소';
     badge.textContent = cancelText;
     badge.className = 'inning-badge badge-cancel';
@@ -758,6 +799,44 @@ function updateScoreUI(s) {
     statusBadge.textContent = cancelText;
     statusBadge.className = 'status-badge badge-cancel';
     stopRefreshLoop();
+  }
+}
+
+// 경기 상황(주자 다이아몬드 + B·S·O) 렌더. 서버가 bases/outs를 주는 라이브 경기에만 표시.
+function renderSituation(s) {
+  const bar = document.getElementById('situation-bar');
+  if (!s || !Array.isArray(s.bases) || s.outs === undefined || s.outs === null) {
+    bar.classList.add('hidden');
+    return;
+  }
+  setBaseFill('sit-base1', s.bases[0]);
+  setBaseFill('sit-base2', s.bases[1]);
+  setBaseFill('sit-base3', s.bases[2]);
+  renderDots('sit-b', 3, parseInt(s.balls || 0, 10), 'on-b');
+  renderDots('sit-s', 2, parseInt(s.strikes || 0, 10), 'on-s');
+  renderDots('sit-o', 2, parseInt(s.outs || 0, 10), 'on-o');
+  bar.classList.remove('hidden');
+}
+function setBaseFill(id, on) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (on) {
+    el.setAttribute('fill', '#FFD700');
+    el.removeAttribute('stroke');
+  } else {
+    el.setAttribute('fill', '#16242F');
+    el.setAttribute('stroke', '#3A4A5A');
+    el.setAttribute('stroke-width', '1.5');
+  }
+}
+function renderDots(containerId, total, lit, onClass) {
+  const c = document.getElementById(containerId);
+  if (!c) return;
+  c.innerHTML = '';
+  for (let i = 0; i < total; i++) {
+    const d = document.createElement('span');
+    d.className = 'sit-dot' + (i < lit ? ' ' + onClass : '');
+    c.appendChild(d);
   }
 }
 
