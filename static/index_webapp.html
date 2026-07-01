@@ -216,26 +216,42 @@ body {
 .pitcher-name { font-size: 12px; color: #CCC; }
 .pitcher-sep  { font-size: 10px; color: #444; }
 
-/* ── 경기 상황(아웃·볼카운트·주자) — status=1에만 표시 ── */
+/* ── 경기 상황(이닝 + 아웃·볼카운트·주자) — status=1에만 표시 ──
+   경기장명 제거 후 확보한 높이만큼 약 2배 확대. 이닝은 상황 바 왼쪽으로 이동. */
 .situation-bar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 18px;
+  justify-content: space-between;
+  gap: 14px;
   background: #11202F;
   border: 1px solid #1E3A52;
-  border-radius: 12px;
-  padding: 9px 14px;
+  border-radius: 14px;
+  padding: 14px 20px;
   margin-bottom: 12px;
 }
-.sit-counts { display: flex; flex-direction: column; gap: 5px; }
-.sit-row { display: flex; align-items: center; gap: 6px; }
-.sit-label { font-size: 11px; color: #7FA0C0; width: 12px; }
-.sit-dots { display: flex; gap: 6px; }
-.sit-dot { width: 9px; height: 9px; border-radius: 50%; background: #23303C; }
+/* 이닝: 화살표 + 숫자 한 줄. 색은 초(▲)=빨강 / 말(▼)=파랑으로 통일(숫자도 화살표 색) */
+.sit-inning {
+  display: flex; align-items: center; gap: 4px;
+  min-width: 60px; justify-content: center; white-space: nowrap;
+}
+.sit-inning.top { color: #FF6B6B; }
+.sit-inning.bot { color: #4A9EFF; }
+.sit-tri     { font-size: 20px; line-height: 1; }
+.sit-inn-num { font-size: 32px; font-weight: 800; line-height: 1; }
+.sit-counts { display: flex; flex-direction: column; gap: 9px; }
+.sit-row { display: flex; align-items: center; gap: 11px; }
+.sit-label { font-size: 16px; font-weight: 700; color: #8A9FBF; width: 16px; }
+.sit-dots { display: flex; gap: 11px; }
+.sit-dot { width: 17px; height: 17px; border-radius: 50%; background: #26313C; }
 .sit-dot.on-b { background: #4CD964; }
 .sit-dot.on-s { background: #FFD700; }
 .sit-dot.on-o { background: #FF6B6B; }
+/* 라이브 중 가운데 라벨 (경기장명 대신 LIVE + 채널 유지) */
+.live-label { font-size: 11px; font-weight: 700; color: #FF6B6B; }
+/* 채널: 채널명(금색) + 채널번호 뱃지 (슬림 위젯 표시 형태와 통일) */
+#channel { display: inline-flex; align-items: center; gap: 4px; }
+.ch-name { font-size: 11px; font-weight: 600; color: #FFD700; }
+.ch-num  { font-size: 10px; font-weight: 700; color: #1A1A2E; background: #FFD700; border-radius: 3px; padding: 0 4px; }
 
 /* ── 양팀 순위 카드 (앱 9f72cc3 동기화: 팀명 칩 + 전적 / 큰 순위 숫자 2줄) ──
    윗줄: [팀명 둥근 칩] [전적 작은 글씨]  ← 가로 한 행
@@ -468,9 +484,12 @@ body {
         </div>
       </div>
 
-      <!-- 경기 상황: 주자 다이아몬드 + B·S·O (status=1에만 표시) -->
+      <!-- 경기 상황: 이닝 + 주자 다이아몬드 + B·S·O (status=1에만 표시) -->
       <div class="situation-bar hidden" id="situation-bar">
-        <svg width="48" height="48" viewBox="0 0 60 60" aria-hidden="true" style="flex-shrink:0;">
+        <div class="sit-inning top" id="sit-inning">
+          <span class="sit-tri" id="sit-tri"></span><span class="sit-inn-num" id="sit-inn-num"></span>
+        </div>
+        <svg width="88" height="88" viewBox="0 0 60 60" aria-hidden="true" style="flex-shrink:0;">
           <polygon id="sit-base2" points="30,8 38,16 30,24 22,16"></polygon>
           <polygon id="sit-base1" points="44,22 52,30 44,38 36,30"></polygon>
           <polygon id="sit-base3" points="16,22 24,30 16,38 8,30"></polygon>
@@ -712,14 +731,26 @@ async function loadAll() {
 async function loadChannel(broadcast) {
   const chName = broadcastName(broadcast);
   if (!state.iptv || !broadcast || broadcast === 'tving') {
-    document.getElementById('channel').textContent = chName;
+    renderChannel(chName, '');
     return;
   }
   try {
     const data = await fetchJSON(`${BASE}/api/channel?iptv=${state.iptv}&broadcaster=${broadcast}`);
     const ch = data['채널번호'] || '';
-    document.getElementById('channel').textContent = ch ? `${chName} ${ch}ch` : chName;
-  } catch { document.getElementById('channel').textContent = chName; }
+    renderChannel(chName, ch);
+  } catch { renderChannel(chName, ''); }
+}
+// 채널명(금색) + 채널번호 뱃지(금색 배경). 슬림 위젯의 채널 표시 형태와 통일.
+function renderChannel(name, ch) {
+  const el = document.getElementById('channel');
+  if (!el) return;
+  if (ch) {
+    el.innerHTML = `<span class="ch-name"></span><span class="ch-num"></span>`;
+    el.querySelector('.ch-name').textContent = name;
+    el.querySelector('.ch-num').textContent = ch;
+  } else {
+    el.textContent = name;
+  }
 }
 
 function broadcastName(b) {
@@ -756,17 +787,21 @@ function updateScoreUI(s) {
   const statusBadge = document.getElementById('game-status-badge');
   const gameTime = document.getElementById('game-time');
 
+  show('stadium');  // 라이브 외 상태에선 경기장명 노출 (라이브 분기에서만 숨김)
+
   if (s.status === '1') {
-    // 경기 중
+    // 경기 중 — 가운데는 LIVE + 채널만, 경기장명·시작시간 숨김. 이닝은 상황 바로 이동.
     awayScoreEl.textContent = s.away_score; show('away-score');
     homeScoreEl.textContent = s.home_score; show('home-score');
-    badge.textContent = s.inning;
-    badge.className = 'inning-badge badge-live';
+    badge.textContent = '● LIVE';
+    badge.className = 'live-label';
+    badge.style.display = 'block';
     show('center-badge');
-    show('game-time');
+    hide('game-time');
+    hide('stadium');
     statusBadge.textContent = `● ${s.inning}`;
     statusBadge.className = 'status-badge badge-live';
-    renderSituation(s);  // 주자 다이아몬드 + B·S·O
+    renderSituation(s);  // 이닝 + 주자 다이아몬드 + B·S·O
     // 라이브: 폴링 시작 (앱 startScoreLoop 등가물)
     startRefreshLoop(REFRESH_INTERVAL_LIVE);
   } else if (s.status === '0') {
@@ -809,6 +844,7 @@ function renderSituation(s) {
     bar.classList.add('hidden');
     return;
   }
+  setInning(s.inning);
   setBaseFill('sit-base1', s.bases[0]);
   setBaseFill('sit-base2', s.bases[1]);
   setBaseFill('sit-base3', s.bases[2]);
@@ -816,6 +852,19 @@ function renderSituation(s) {
   renderDots('sit-s', 2, parseInt(s.strikes || 0, 10), 'on-s');
   renderDots('sit-o', 2, parseInt(s.outs || 0, 10), 'on-o');
   bar.classList.remove('hidden');
+}
+// 이닝 문자열("5회초"/"5회말") → 화살표+숫자. 초=▲빨강 / 말=▼파랑 (숫자도 화살표 색으로 통일).
+function setInning(inningStr) {
+  const wrap = document.getElementById('sit-inning');
+  const tri  = document.getElementById('sit-tri');
+  const num  = document.getElementById('sit-inn-num');
+  if (!wrap || !tri || !num) return;
+  const str = String(inningStr || '');
+  const m = str.match(/(\d+)/);
+  num.textContent = m ? m[1] : '';
+  const isBot = str.includes('말');
+  tri.textContent = m ? (isBot ? '▼' : '▲') : '';
+  wrap.className = 'sit-inning ' + (isBot ? 'bot' : 'top');
 }
 function setBaseFill(id, on) {
   const el = document.getElementById(id);
