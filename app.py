@@ -315,6 +315,9 @@ def _ensure_driver():
         options.add_argument('--disable-crashpad')
         options.add_argument('--no-zygote')
         options.add_argument('--disable-extensions')
+        # gVisor 계열 샌드박스(레일웨이)에서 신형 V8이 pkey 미지원으로 SIGTRAP
+        # 크래시하는 사례 대응 — 미지원 플래그면 경고만 내고 무시되므로 무해
+        options.add_argument('--js-flags=--no-memory-protection-keys')
         options.add_argument('user-agent=Mozilla/5.0')
         for a in extra:
             options.add_argument(a)
@@ -868,6 +871,101 @@ def _get_gamecenter_lines(today):
 
 
 # ─────────────────────────────────────────
+# KBO 공식 스코어보드 JSON (Selenium 불필요)
+#
+# 2026-07-07: Docker 재빌드로 유입된 Chromium 150이 Railway 컨테이너에서
+# SIGTRAP으로 즉사 → Selenium 의존 경로가 전부 마비. 조사 결과 KBO 메인의
+# 자체 AJAX 엔드포인트(GetKboGameList)가 일반 POST로 팀·점수·이닝·상태·
+# B/S/O·주자·현재 투타까지 전부 반환함을 확인 — 스코어의 1차 소스를 이걸로
+# 전환하고 GameCenter(Selenium) 파싱은 폴백으로 강등.
+# ─────────────────────────────────────────
+
+def _fetch_kbo_gamelist(date_str):
+    """KBO GetKboGameList JSON (일반 HTTP POST). 실패 시 []."""
+    try:
+        res = requests.post(
+            'https://www.koreabaseball.com/ws/Main.asmx/GetKboGameList',
+            headers=_get_kbo_headers(),
+            data={'leId': '1', 'srId': '0,1,3,4,5,7,9', 'date': date_str},
+            timeout=10)
+        data = res.json()
+        games = data.get('game') or []
+        if not games:
+            # 루트 키가 다를 경우 대비: G_ID를 가진 dict 리스트를 찾는다
+            for v in (data.values() if isinstance(data, dict) else []):
+                if isinstance(v, list) and v and isinstance(v[0], dict) and 'G_ID' in v[0]:
+                    games = v
+                    break
+        return games
+    except Exception as e:
+        print(f"[gamelist fetch 오류] {e}")
+        return []
+
+
+def _scores_from_gamelist(games):
+    """GetKboGameList JSON → 기존 /api/scores 스키마.
+
+    상태 매핑: KBO GAME_STATE_SC 1=경기전, 2=진행중, 3~=종료 / CANCEL_SC_ID≠0=취소
+    → 앱 status 0=예정, 1=라이브, 2=종료, 3=취소.
+    라이브 경기에는 B/S/O·주자(bases)를 인라인으로 채워 ScoreBoard 파싱이 필요 없다."""
+    scores = []
+    for g in games:
+        away = str(g.get('AWAY_NM') or '').strip()
+        home = str(g.get('HOME_NM') or '').strip()
+        if not away or not home:
+            continue
+        state  = str(g.get('GAME_STATE_SC') or '')
+        cancel = str(g.get('CANCEL_SC_ID') or '0')
+        t_sc = g.get('T_SCORE_CN')
+        b_sc = g.get('B_SCORE_CN')
+        away_score = '' if t_sc in (None, '') else str(t_sc)
+        home_score = '' if b_sc in (None, '') else str(b_sc)
+
+        if cancel not in ('0', '', 'None'):
+            scores.append({'away': away, 'home': home, 'away_score': '', 'home_score': '',
+                           'status': '3', 'inning': '경기취소'})
+        elif state == '1':
+            scores.append({'away': away, 'home': home, 'away_score': '', 'home_score': '',
+                           'status': '0', 'inning': ''})
+        elif state == '2':
+            inning = f"{g.get('GAME_INN_NO', '')}회{str(g.get('GAME_TB_SC_NM') or '')}"
+            scores.append({
+                'away': away, 'home': home,
+                'away_score': away_score, 'home_score': home_score,
+                'status': '1', 'inning': inning,
+                'balls':   int(g.get('BALL_CN') or 0),
+                'strikes': int(g.get('STRIKE_CN') or 0),
+                'outs':    int(g.get('OUT_CN') or 0),
+                'bases': [bool(g.get('B1_BAT_ORDER_NO') or 0),
+                          bool(g.get('B2_BAT_ORDER_NO') or 0),
+                          bool(g.get('B3_BAT_ORDER_NO') or 0)],
+            })
+        else:  # 3 이상 = 종료
+            scores.append({'away': away, 'home': home,
+                           'away_score': away_score, 'home_score': home_score,
+                           'status': '2', 'inning': '경기종료'})
+    return scores
+
+
+def _get_line_scores(force=False):
+    """ScoreBoard.aspx를 일반 HTTP GET으로 받아 이닝별 점수 캐시 갱신 (Selenium 불필요).
+    라인스코어 테이블은 서버렌더라 JS 없이도 그대로 파싱된다 (프로브로 확인)."""
+    global _linescore_cache, _linescore_cache_time
+    now = time_module.time()
+    if not force and _linescore_cache and now - _linescore_cache_time < _TTL_SITUATION:
+        return _linescore_cache
+    try:
+        res = requests.get(_SCOREBOARD_URL, headers=_get_kbo_headers(), timeout=10)
+        ls = _parse_line_scores(res.text)
+        if ls:
+            _linescore_cache = ls
+            _linescore_cache_time = time_module.time()
+    except Exception as e:
+        print(f"[linescore fetch 오류] {e}")
+    return _linescore_cache
+
+
+# ─────────────────────────────────────────
 # 득점 이벤트(문자중계 상황카드)
 # ─────────────────────────────────────────
 
@@ -958,10 +1056,22 @@ def get_live_scores(force=False):
 
     if not force and _scores_cache and now - _scores_cache_time < _TTL_SCORES and _scores_cache_date == today:
         return _scores_cache
-    snap = _get_gamecenter_snapshot(today, force=force)
-    if not snap:
-        return _scores_cache
 
+    # 1차: KBO 공식 JSON (일반 HTTP, Selenium 불필요) — 팀·점수·이닝·상태·B/S/O·주자 포함
+    scores = _scores_from_gamelist(_fetch_kbo_gamelist(today))
+
+    # 2차 폴백: 기존 GameCenter(Selenium) 텍스트 파싱
+    if not scores:
+        snap = _get_gamecenter_snapshot(today, force=force)
+        if not snap:
+            return _scores_cache
+        scores = _parse_gamecenter_scores(snap)
+
+    return _finalize_scores(scores, today, force)
+
+
+def _parse_gamecenter_scores(snap):
+    """GameCenter body 텍스트 파싱 (기존 Selenium 경로 — gamelist 실패 시 폴백)."""
     lines = snap['lines']
     stadium_team_map = snap['stadium_map']
 
@@ -1055,9 +1165,15 @@ def get_live_scores(force=False):
     except Exception as e:
         print(f"[스코어 파싱 오류] {e}")
 
+    return scores
+
+
+def _finalize_scores(scores, today, force=False):
+    """파싱된 scores에 상태 보호·상황/라인스코어 부착·relay·캐시 갱신을 적용."""
+    global _scores_cache, _scores_cache_time, _scores_cache_date
     if scores:
         # 종료(status=2)였던 경기를 진행 중(status=1)으로 되돌리지 않음
-        # (Selenium 실패로 오래된 스냅샷 재파싱 시 status 강등 방지)
+        # (오래된 소스 재파싱 시 status 강등 방지)
         if _scores_cache and _scores_cache_date == today:
             ended = {(s['away'], s['home']) for s in _scores_cache if s.get('status') == '2'}
             scores = [
@@ -1068,24 +1184,29 @@ def get_live_scores(force=False):
                 for s in scores
             ]
 
-        # 라이브 경기에 아웃/볼카운트/주자(베이스) 상황 부착.
-        # ScoreBoard.aspx를 사이클당 1회 로드(라이브 있을 때만). 기존 키는 그대로 두고 새 키만 추가.
+        # 라이브 경기에 상황(B/S/O·주자)·라인스코어 부착.
+        # gamelist 경로는 상황을 이미 인라인으로 가짐 → 없을 때(폴백 경로)만 Selenium 상황판.
+        # 라인스코어는 일반 HTTP(ScoreBoard.aspx)라 항상 시도.
         if any(s.get('status') == '1' for s in scores):
             try:
-                sit = _get_scoreboard_situations(force=force)
+                ls_map = _get_line_scores(force=force)
+                sit = None
                 for s in scores:
                     if s.get('status') != '1':
                         continue
-                    info = sit.get((s['away'], s['home']))
-                    if info:
-                        s['balls']   = info['balls']
-                        s['strikes'] = info['strikes']
-                        s['outs']    = info['outs']
-                        s['bases']   = info['bases']
-                    # 이닝별 점수(라인스코어) — situation과 같은 페이지에서 파싱된 캐시.
-                    # 10분 이상 stale이면 잘못된 표를 보여주느니 생략 (앱은 필드 없으면 숨김)
-                    if _linescore_cache and time_module.time() - _linescore_cache_time < 600:
-                        ls = _linescore_cache.get((s['away'], s['home']))
+                    if 'balls' not in s:
+                        if sit is None:
+                            sit = _get_scoreboard_situations(force=force)
+                        info = sit.get((s['away'], s['home']))
+                        if info:
+                            s['balls']   = info['balls']
+                            s['strikes'] = info['strikes']
+                            s['outs']    = info['outs']
+                            s['bases']   = info['bases']
+                    # 이닝별 점수(라인스코어) — 10분 이상 stale이면 잘못된 표를
+                    # 보여주느니 생략 (앱은 필드 없으면 숨김)
+                    if ls_map and time_module.time() - _linescore_cache_time < 600:
+                        ls = ls_map.get((s['away'], s['home']))
                         if ls:
                             s['line_score'] = ls
             except Exception as e:
