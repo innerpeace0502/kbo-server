@@ -2085,12 +2085,49 @@ def _boot_warm():
     try:
         chrome.start("boot_warm")
         today = get_game_date()
+        scores = []
         try:
             scores = get_live_scores(force=True)
             if scores:
                 _save_disk_cache('scores', {'date': today, 'scores': scores})
         except Exception as e:
             print(f"[boot_warm scores 오류] {e}")
+
+        # game_mode 재예약 — 재시작으로 잃은 schedule 잡 복구.
+        # ⚠️ 무거운 워밍(순위·최근경기 10팀)보다 먼저 실행: 도중에 죽어도 라이브 갱신은 복구되도록.
+        # 부팅이 game_mode 시간대 안이면 chrome을 유지해 _bg가 _warm을 이어가게 한다.
+        try:
+            # KBO 일정 POST는 간헐 실패하므로 재시도. 그래도 비면 아래 스코어보드 폴백.
+            games = []
+            for attempt in range(3):
+                games = get_kbo_schedule(today)
+                if games:
+                    break
+                time_module.sleep(5)
+            if games:
+                first_start = _parse_first_game_time(games, today)
+                last_end = _estimate_last_game_end(games, today)
+                if first_start and last_end:
+                    _schedule_game_mode(first_start, last_end)
+                    now_kst = datetime.now(KST)
+                    win_start = first_start - timedelta(hours=1, minutes=5)
+                    win_end = last_end + timedelta(minutes=5)
+                    if win_start <= now_kst <= win_end:
+                        keep_chrome = True
+                        print(f"[boot_warm] game_mode 시간대({win_start.strftime('%H:%M')}~{win_end.strftime('%H:%M')}) — Chrome 유지")
+            if not keep_chrome and any(s.get('status') in ('0', '1') for s in scores):
+                # 일정 조회가 실패/공백이어도 스코어보드에 예정·진행 경기가 있으면 경기일로
+                # 간주하고 Chrome을 유지 — 종료 판단은 stop_game_mode 체인에 위임한다
+                # (미종료 경기가 있으면 스스로 20분씩 연기, 다 끝나면 최종 저장 후 OFF).
+                # 과거: 경기 중 재배포 + 일정 POST 1회 실패 → 절전에 갇혀 라이브 먹통 (7/7 발생).
+                target = datetime.now(KST) + timedelta(minutes=30)
+                schedule.clear('game_stop_once')
+                schedule.every().day.at(target.strftime('%H:%M'), "Asia/Seoul").do(stop_game_mode).tag('game_stop_once')
+                keep_chrome = True
+                print(f"[boot_warm] 일정 조회 실패했지만 스코어보드에 경기 존재 — Chrome 유지, {target.strftime('%H:%M')} KST에 종료 확인")
+        except Exception as e:
+            print(f"[boot_warm game_mode 재예약 오류] {e}")
+
         try:
             rk = get_team_ranking(force=True)
             if rk:
@@ -2106,24 +2143,6 @@ def _boot_warm():
                 print(f"[boot_warm recent {t} 오류] {e}")
         _save_pitcher_disk_cache(today)
         _save_gameinfo_disk_cache(today)
-
-        # game_mode 재예약 — 재시작으로 잃은 schedule 잡 복구.
-        # 부팅이 game_mode 시간대 안이면 chrome을 유지해 _bg가 _warm을 이어가게 한다.
-        try:
-            games = get_kbo_schedule(today)
-            if games:
-                first_start = _parse_first_game_time(games, today)
-                last_end = _estimate_last_game_end(games, today)
-                if first_start and last_end:
-                    _schedule_game_mode(first_start, last_end)
-                    now_kst = datetime.now(KST)
-                    win_start = first_start - timedelta(hours=1, minutes=5)
-                    win_end = last_end + timedelta(minutes=5)
-                    if win_start <= now_kst <= win_end:
-                        keep_chrome = True
-                        print(f"[boot_warm] game_mode 시간대({win_start.strftime('%H:%M')}~{win_end.strftime('%H:%M')}) — Chrome 유지")
-        except Exception as e:
-            print(f"[boot_warm game_mode 재예약 오류] {e}")
 
         print("[boot_warm] 부팅 워밍 완료")
     except Exception as e:
