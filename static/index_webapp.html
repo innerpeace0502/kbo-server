@@ -246,6 +246,36 @@ body {
 .sit-dot.on-b { background: #4CD964; }
 .sit-dot.on-s { background: #FFD700; }
 .sit-dot.on-o { background: #FF6B6B; }
+/* ── 이닝별 점수표(라인스코어) — 라이브에만 표시, 진행 이닝 골드 하이라이트 ── */
+.line-score-card {
+  background: #11202F;
+  border: 1px solid #1E3A52;
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.line-score-scroll { overflow-x: auto; }
+#line-score-table { border-collapse: collapse; margin: 0 auto; white-space: nowrap; }
+#line-score-table th, #line-score-table td {
+  min-width: 22px; text-align: center;
+  font-size: 11px; padding: 2px 3px;
+  color: #FFF; font-weight: 400;
+}
+#line-score-table tr:first-child th { color: #8A9FBF; }
+#line-score-table .ls-team { font-weight: 700; min-width: 36px; text-align: left; padding-right: 6px; }
+#line-score-table .rhe { color: #8A9FBF; font-weight: 700; }
+#line-score-table .cur { color: #FFD700; font-weight: 700; }
+
+/* ── 득점 상황카드(문자중계) — 최신 카드는 골드+볼드 강조 ── */
+#relay-cards { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.relay-card {
+  display: flex; align-items: baseline; gap: 8px;
+  background: #1A1A2A; border-radius: 10px; padding: 8px 12px;
+}
+.relay-time { font-size: 10px; color: #8A9FBF; flex-shrink: 0; }
+.relay-text { font-size: 12px; color: #FFF; line-height: 1.4; }
+.relay-card.latest .relay-text { color: #FFD700; font-weight: 700; }
+
 /* 라이브 중 가운데 라벨 (경기장명 대신 LIVE + 채널 유지) */
 .live-label { font-size: 11px; font-weight: 700; color: #FF6B6B; }
 /* 채널: 채널명(금색) + 채널번호 뱃지 (슬림 위젯 표시 형태와 통일) */
@@ -501,6 +531,16 @@ body {
           <div class="sit-row"><span class="sit-label">O</span><span class="sit-dots" id="sit-o"></span></div>
         </div>
       </div>
+
+      <!-- 이닝별 점수표(라인스코어) — 라이브에만, 서버 line_score 필드 있을 때만 (앱 c99abb4 동기화) -->
+      <div class="line-score-card hidden" id="line-score-card">
+        <div class="line-score-scroll">
+          <table id="line-score-table"></table>
+        </div>
+      </div>
+
+      <!-- 득점 상황카드(문자중계) — 라이브에만, /api/relay 이벤트 최신순 (앱 069092b 동기화) -->
+      <div id="relay-cards" class="hidden"></div>
 
       <div class="card-divider"></div>
       <div class="pitcher-row" id="pitcher-row">
@@ -802,12 +842,15 @@ function updateScoreUI(s) {
     statusBadge.textContent = `● ${s.inning}`;
     statusBadge.className = 'status-badge badge-live';
     renderSituation(s);  // 이닝 + 주자 다이아몬드 + B·S·O
+    renderLineScore(s);  // 이닝별 점수표 (서버 line_score 있을 때만)
+    loadRelay(s.away);   // 득점 상황카드 (문자중계)
     // 라이브: 폴링 시작 (앱 startScoreLoop 등가물)
     startRefreshLoop(REFRESH_INTERVAL_LIVE);
   } else if (s.status === '0') {
     // 경기 예정(오늘) — VS + 시작시간 표시 + 60초 폴링으로 라이브 전환 자동 감지
     hide('away-score'); hide('home-score');
     hide('situation-bar');
+    hide('line-score-card'); hide('relay-cards');
     setPreState(state.gameTime);
     startRefreshLoop(REFRESH_INTERVAL_PRE);
   } else if (s.status === '2') {
@@ -819,6 +862,7 @@ function updateScoreUI(s) {
     show('center-badge');
     hide('game-time');
     hide('situation-bar');
+    hide('line-score-card'); hide('relay-cards');
     statusBadge.textContent = '경기종료';
     statusBadge.className = 'status-badge badge-ended';
     stopRefreshLoop();
@@ -826,6 +870,7 @@ function updateScoreUI(s) {
     // 우천취소 (경기취소) — 앱 0526d56 동기화. 점수 숨기고 취소 배지 + 시작 시간 숨김
     hide('away-score'); hide('home-score');
     hide('situation-bar');
+    hide('line-score-card'); hide('relay-cards');
     const cancelText = s.inning && s.inning.length > 0 ? s.inning : '우천취소';
     badge.textContent = cancelText;
     badge.className = 'inning-badge badge-cancel';
@@ -835,6 +880,65 @@ function updateScoreUI(s) {
     statusBadge.className = 'status-badge badge-cancel';
     stopRefreshLoop();
   }
+}
+
+// ── 이닝별 점수표(라인스코어) — 라이브에만, 서버 line_score 있을 때만 (앱과 동일 규칙) ──
+function renderLineScore(s) {
+  const card = document.getElementById('line-score-card');
+  const ls = s && s.line_score;
+  if (!ls || !Array.isArray(ls.away) || !Array.isArray(ls.home)) {
+    card.classList.add('hidden');
+    return;
+  }
+  const innings = Math.max(9, ls.away.length, ls.home.length);
+  const curM = String(s.inning || '').match(/(\d+)/);
+  const cur = curM ? parseInt(curM[1], 10) : 0;
+  const hasRhe = Array.isArray(ls.away_rhe) && Array.isArray(ls.home_rhe);
+
+  let html = '<tr><th class="ls-team"></th>';
+  for (let i = 1; i <= innings; i++) html += `<th class="${i === cur ? 'cur' : ''}">${i}</th>`;
+  if (hasRhe) html += '<th class="rhe">R</th><th class="rhe">H</th><th class="rhe">E</th>';
+  html += '</tr>';
+
+  const row = (name, arr, rhe) => {
+    let r = `<tr><th class="ls-team">${escapeHtml(name)}</th>`;
+    for (let i = 0; i < innings; i++) {
+      const v = (arr[i] === undefined || arr[i] === '') ? '-' : arr[i];
+      r += `<td class="${i + 1 === cur ? 'cur' : ''}">${escapeHtml(String(v))}</td>`;
+    }
+    if (rhe) r += rhe.slice(0, 3).map(v => `<td class="rhe">${escapeHtml(String(v ?? '-'))}</td>`).join('');
+    return r + '</tr>';
+  };
+  html += row(s.away, ls.away, hasRhe ? ls.away_rhe : null);
+  html += row(s.home, ls.home, hasRhe ? ls.home_rhe : null);
+
+  document.getElementById('line-score-table').innerHTML = html;
+  card.classList.remove('hidden');
+  // 연장으로 표가 넓어지면 진행 중 이닝이 보이게 오른쪽 끝으로 스크롤
+  const sc = card.querySelector('.line-score-scroll');
+  if (sc) sc.scrollLeft = sc.scrollWidth;
+}
+
+// ── 득점 상황카드(문자중계) — /api/relay 이벤트 최신순 8개, 최신은 골드 강조 ──
+async function loadRelay(team) {
+  try {
+    const data = await fetchJSON(`${BASE}/api/relay?team=${encodeURIComponent(team || '')}`);
+    renderRelayCards(data.events || []);
+  } catch (e) { console.warn('relay 오류', e); }
+}
+function renderRelayCards(events) {
+  const wrap = document.getElementById('relay-cards');
+  if (!events.length) { wrap.classList.add('hidden'); return; }
+  wrap.innerHTML = events.slice(0, 8).map((e, i) =>
+    `<div class="relay-card${i === 0 ? ' latest' : ''}">` +
+    `<span class="relay-time">${escapeHtml(e.time || '')}</span>` +
+    `<span class="relay-text">${escapeHtml(e.text || '')}</span></div>`
+  ).join('');
+  wrap.classList.remove('hidden');
+}
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 // 경기 상황(주자 다이아몬드 + B·S·O) 렌더. 서버가 bases/outs를 주는 라이브 경기에만 표시.
