@@ -91,6 +91,19 @@ _SB_BASE_RE = re.compile(
     r'<p>(\d)-(\d)\s*<span>(\d)</span>\s*out',
     re.DOTALL)
 
+# ── 이닝별 점수(라인스코어) — ScoreBoard.aspx의 게임별 스코어 테이블 ──
+# situation과 같은 페이지 로드에서 파싱하므로 추가 스크레이핑 비용 없음.
+_linescore_cache      = {}   # {(away,home): {'away':[...], 'home':[...], 'away_rhe':[R,H,E], 'home_rhe':[R,H,E]}}
+_linescore_cache_time = 0
+
+# ── 득점 이벤트(문자중계 상황카드) — 스코어 변화 감지로 서버가 생성 ──
+# 외부 요청을 전혀 추가하지 않는다: get_live_scores 갱신 사이클의 부산물.
+_relay_events = []   # [{'ts','time','away','home','inning','team','runs','score','text'}]
+_relay_date   = ""
+_relay_prev   = {}   # {(away,home): (away_score, home_score)} 직전 관측 점수
+_relay_lock   = threading.Lock()
+_RELAY_MAX    = 200
+
 
 def _save_scores_persist(scores, date_str):
     """경기 종료 스코어를 파일에 저장 (Railway 재시작 후 복원용)."""
@@ -540,11 +553,59 @@ def _fetch_body_and_source(url, wait_patterns=None, max_wait=12):
             return None, None
 
 
+def _parse_line_scores(source):
+    """ScoreBoard.aspx HTML → {(away,home): 라인스코어 dict}. 실패 시 {}.
+
+    게임별 스코어 테이블을 클래스명에 의존하지 않고 구조로 찾는다:
+    헤더에 숫자 이닝 칸이 9개 이상 + R·H·E 칸이 있고, 본문에 KBO 팀명으로
+    시작하는 행이 정확히 2개(첫 행=원정, 둘째 행=홈)인 테이블.
+    진행 전 이닝 값('-' 등)은 그대로 문자열로 전달해 클라이언트가 표시."""
+    result = {}
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(source, 'lxml')
+        for table in soup.find_all('table'):
+            rows = table.find_all('tr')
+            if len(rows) < 3:
+                continue
+            headers = [c.get_text(strip=True) for c in rows[0].find_all(['th', 'td'])]
+            inning_idx = [i for i, h in enumerate(headers) if h.isdigit()]
+            if len(inning_idx) < 9:
+                continue
+            try:
+                rhe_idx = [headers.index(k) for k in ('R', 'H', 'E')]
+            except ValueError:
+                continue
+
+            team_rows = []
+            for tr in rows[1:]:
+                cells = [c.get_text(strip=True) for c in tr.find_all(['th', 'td'])]
+                if cells and cells[0] in KBO_TEAMS and len(cells) == len(headers):
+                    team_rows.append(cells)
+            if len(team_rows) != 2:
+                continue
+
+            away_c, home_c = team_rows
+            entry = {
+                'away':     [away_c[i] for i in inning_idx],
+                'home':     [home_c[i] for i in inning_idx],
+                'away_rhe': [away_c[i] for i in rhe_idx],
+                'home_rhe': [home_c[i] for i in rhe_idx],
+            }
+            # 양방향 키 (스코어 응답의 away/home 순서 차이 대비) — 값의 방향은 실제 경기 기준 유지
+            result[(away_c[0], home_c[0])] = entry
+            result[(home_c[0], away_c[0])] = entry
+    except Exception as e:
+        print(f"[linescore 파싱 오류] {e}")
+    return result
+
+
 def _get_scoreboard_situations(force=False):
     """ScoreBoard.aspx → {(away,home): {balls,strikes,outs,bases:[1루,2루,3루]}}.
     라이브 경기의 아웃/볼카운트/주자 표시용. 5경기가 한 페이지에 있어 사이클당 1회 로드.
-    카운트는 body 텍스트(신뢰), 주자는 HTML(base_on.png). 양쪽 순서를 카운트 체크섬으로 대조."""
-    global _situation_cache, _situation_cache_time
+    카운트는 body 텍스트(신뢰), 주자는 HTML(base_on.png). 양쪽 순서를 카운트 체크섬으로 대조.
+    같은 HTML에서 이닝별 점수(_linescore_cache)도 함께 파싱한다."""
+    global _situation_cache, _situation_cache_time, _linescore_cache, _linescore_cache_time
     now = time_module.time()
     if not force and _situation_cache and now - _situation_cache_time < _TTL_SITUATION:
         return _situation_cache
@@ -593,6 +654,13 @@ def _get_scoreboard_situations(force=False):
     if result:
         _situation_cache = result
         _situation_cache_time = time_module.time()
+
+    # 같은 페이지 소스에서 이닝별 점수도 파싱 (추가 페이지 로드 없음)
+    line_scores = _parse_line_scores(source)
+    if line_scores:
+        _linescore_cache = line_scores
+        _linescore_cache_time = time_module.time()
+
     return result
 
 
@@ -784,6 +852,77 @@ def _get_gamecenter_lines(today):
 
 
 # ─────────────────────────────────────────
+# 득점 이벤트(문자중계 상황카드)
+# ─────────────────────────────────────────
+
+def _update_relay_events(scores, today):
+    """스코어 갱신 사이클마다 점수 변화를 감지해 득점 이벤트를 누적한다.
+
+    - 외부 요청 0회: get_live_scores가 이미 만든 scores만 본다.
+    - 첫 관측(직전 점수 없음)은 이벤트 없이 기준점만 기록 — 서버 재시작 시
+      기존 점수가 몰아서 이벤트로 쏟아지는 것을 방지.
+    - 점수 정정(감소)은 이벤트 없이 기준점만 갱신.
+    - /tmp에 영속 저장해 재시작·절전 모드에도 이벤트가 유지된다.
+    """
+    global _relay_events, _relay_date, _relay_prev
+    with _relay_lock:
+        if _relay_date != today:
+            _relay_events = []
+            _relay_prev   = {}
+            _relay_date   = today
+            disk, _ = _load_disk_cache('relay')
+            if disk and isinstance(disk, dict) and disk.get('date') == today:
+                _relay_events = disk.get('events', [])
+                _relay_prev   = {
+                    tuple(k.split('|', 1)): tuple(v)
+                    for k, v in disk.get('prev', {}).items()
+                }
+
+        changed = False
+        for s in scores:
+            if s.get('status') != '1':
+                continue
+            try:
+                a = int(s.get('away_score', ''))
+                h = int(s.get('home_score', ''))
+            except ValueError:
+                continue
+            key  = (s['away'], s['home'])
+            prev = _relay_prev.get(key)
+            if prev is not None:
+                pa, ph = prev
+                inning = s.get('inning', '')
+                for team, diff in ((s['away'], a - pa), (s['home'], h - ph)):
+                    if diff > 0:
+                        now_ts = time_module.time()
+                        _relay_events.append({
+                            'ts':     now_ts,
+                            'time':   datetime.now(KST).strftime('%H:%M'),
+                            'away':   s['away'],
+                            'home':   s['home'],
+                            'inning': inning,
+                            'team':   team,
+                            'runs':   diff,
+                            'score':  f"{a}:{h}",
+                            'type':   'score',
+                            'text':   f"{inning} {team} {diff}득점 ({s['away']} {a} : {h} {s['home']})",
+                        })
+                        changed = True
+            if prev != (a, h):
+                _relay_prev[key] = (a, h)
+                changed = True
+
+        if changed:
+            if len(_relay_events) > _RELAY_MAX:
+                _relay_events = _relay_events[-_RELAY_MAX:]
+            _save_disk_cache('relay', {
+                'date':   today,
+                'events': _relay_events,
+                'prev':   {f"{k[0]}|{k[1]}": list(v) for k, v in _relay_prev.items()},
+            })
+
+
+# ─────────────────────────────────────────
 # 라이브 스코어 / 경기 정보 / 순위 / 최근전적
 # ─────────────────────────────────────────
 
@@ -927,8 +1066,20 @@ def get_live_scores(force=False):
                         s['strikes'] = info['strikes']
                         s['outs']    = info['outs']
                         s['bases']   = info['bases']
+                    # 이닝별 점수(라인스코어) — situation과 같은 페이지에서 파싱된 캐시.
+                    # 10분 이상 stale이면 잘못된 표를 보여주느니 생략 (앱은 필드 없으면 숨김)
+                    if _linescore_cache and time_module.time() - _linescore_cache_time < 600:
+                        ls = _linescore_cache.get((s['away'], s['home']))
+                        if ls:
+                            s['line_score'] = ls
             except Exception as e:
                 print(f"[situation 부착 오류] {e}")
+
+        # 득점 이벤트(문자중계 상황카드) 갱신 — 외부 요청 없이 점수 변화만 감지
+        try:
+            _update_relay_events(scores, today)
+        except Exception as e:
+            print(f"[relay 이벤트 오류] {e}")
 
         _scores_cache      = scores
         _scores_cache_time = time_module.time()
@@ -2150,6 +2301,27 @@ def live_scores():
     if team:
         scores = [s for s in scores if team in s['away'] or team in s['home']]
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
+
+
+@app.route('/api/relay')
+def relay_events():
+    """득점 이벤트(문자중계 상황카드) — 최신순 최대 30개.
+
+    스크레이핑을 트리거하지 않는다: 이벤트는 기존 스코어 갱신 사이클의
+    부산물이라 이 라우트가 아무리 자주 호출돼도 외부 요청·Selenium 비용이 0.
+    절전 모드·재시작 직후엔 디스크 캐시에서 복원해 반환."""
+    team  = request.args.get('team')
+    today = get_game_date()
+    with _relay_lock:
+        events = list(_relay_events) if _relay_date == today else []
+    if not events:
+        disk, _ = _load_disk_cache('relay')
+        if disk and isinstance(disk, dict) and disk.get('date') == today:
+            events = disk.get('events', [])
+    if team:
+        events = [e for e in events if team in e.get('away', '') or team in e.get('home', '')]
+    events = events[-30:][::-1]  # 최신 이벤트가 맨 앞
+    return jsonify({'date': today, 'events': events, 'count': len(events)})
 
 
 @app.route('/api/gameinfo')
