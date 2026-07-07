@@ -299,28 +299,44 @@ def _ensure_driver():
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service as S
+    import tempfile
 
-    options = Options()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    options.add_argument('user-agent=Mozilla/5.0')
+    def _build_options(extra=()):
+        options = Options()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
+        # ── 신형 Chromium(Docker 재빌드로 유입) 컨테이너 기동 대책 ──
+        # "session not created: Chrome instance exited"로 즉사하던 문제(2026-07-07):
+        # 기본 프로필 잠금(SingletonLock)·crashpad가 원인이 되므로 매 기동마다
+        # 고유한 임시 프로필을 쓰고 crashpad/zygote를 끈다.
+        options.add_argument(f'--user-data-dir={tempfile.mkdtemp(prefix="kbo-chrome-")}')
+        options.add_argument('--disable-crashpad')
+        options.add_argument('--no-zygote')
+        options.add_argument('--disable-extensions')
+        options.add_argument('user-agent=Mozilla/5.0')
+        for a in extra:
+            options.add_argument(a)
+        for path in ['/usr/bin/chromium', '/usr/bin/chromium-browser']:
+            if os.path.exists(path):
+                options.binary_location = path
+                break
+        return options
 
-    for path in ['/usr/bin/chromium', '/usr/bin/chromium-browser']:
-        if os.path.exists(path):
-            options.binary_location = path
-            break
-
-    driver = None
-    for cd in ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']:
-        if os.path.exists(cd):
-            driver = webdriver.Chrome(service=S(cd), options=options)
-            break
-
-    if driver is None:
+    def _launch(options):
+        for cd in ['/usr/bin/chromedriver', '/usr/lib/chromium/chromedriver']:
+            if os.path.exists(cd):
+                return webdriver.Chrome(service=S(cd), options=options)
         from webdriver_manager.chrome import ChromeDriverManager
-        driver = webdriver.Chrome(service=S(ChromeDriverManager().install()), options=options)
+        return webdriver.Chrome(service=S(ChromeDriverManager().install()), options=options)
+
+    try:
+        driver = _launch(_build_options())
+    except Exception as e:
+        # 저메모리 컨테이너 폴백: 프로세스 하나로 띄우면 기동 메모리가 크게 준다
+        print(f"[driver] 1차 기동 실패({e.__class__.__name__}) — --single-process 재시도")
+        driver = _launch(_build_options(extra=('--single-process',)))
 
     _driver = driver
     return _driver
