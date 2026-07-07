@@ -2513,6 +2513,45 @@ def debug_scores():
     return jsonify({'scores': scores, 'updated': _fmt_ts(_scores_cache_time)})
 
 
+@app.route('/api/debug/chrome')
+def debug_chrome():
+    """Chromium이 컨테이너에서 왜 죽는지 직접 실행해 stderr를 캡처하는 진단 라우트.
+    selenium을 거치지 않으므로 'Chrome instance exited'의 실제 원인이 그대로 드러난다."""
+    import subprocess
+    info = {}
+    for name, cmd in [('chromium_version', ['/usr/bin/chromium', '--version']),
+                      ('chromedriver_version', ['/usr/bin/chromedriver', '--version'])]:
+        try:
+            info[name] = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout.strip()
+        except Exception as e:
+            info[name] = f'실패: {e}'
+    # cgroup 메모리 한도/사용량 (OOM 판별)
+    for name, path in [('mem_max', '/sys/fs/cgroup/memory.max'),
+                       ('mem_current', '/sys/fs/cgroup/memory.current'),
+                       ('mem_max_v1', '/sys/fs/cgroup/memory/memory.limit_in_bytes')]:
+        try:
+            with open(path) as f:
+                info[name] = f.read().strip()
+        except Exception:
+            pass
+    try:
+        import tempfile
+        r = subprocess.run(
+            ['/usr/bin/chromium', '--headless', '--no-sandbox', '--disable-dev-shm-usage',
+             '--disable-gpu', '--disable-crashpad', '--no-zygote',
+             f'--user-data-dir={tempfile.mkdtemp(prefix="dbg-chrome-")}',
+             '--dump-dom', 'about:blank'],
+            capture_output=True, text=True, timeout=40)
+        info['direct_run'] = {
+            'returncode': r.returncode,
+            'stdout_head': r.stdout[:500],
+            'stderr_tail': r.stderr[-3000:],
+        }
+    except Exception as e:
+        info['direct_run'] = f'실행 실패: {e}'
+    return jsonify(info)
+
+
 @app.route('/api/debug/scheduler')
 def debug_scheduler():
     """스케줄러 진단 - 시스템 TZ, 현재 시각, 등록된 jobs 목록을 반환.
