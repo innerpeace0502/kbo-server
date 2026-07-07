@@ -880,6 +880,26 @@ def _get_gamecenter_lines(today):
 # 전환하고 GameCenter(Selenium) 파싱은 폴백으로 강등.
 # ─────────────────────────────────────────
 
+# gamelist 짧은 캐시 — scores(120s TTL)·gameinfo(경기당 호출)가 같은 사이클에
+# 중복 POST하지 않도록 20초만 공유한다.
+_gamelist_cache      = {}
+_gamelist_cache_time = {}
+_TTL_GAMELIST        = 20
+
+
+def _get_kbo_gamelist_cached(date_str, force=False):
+    now = time_module.time()
+    if not force and date_str in _gamelist_cache \
+            and now - _gamelist_cache_time.get(date_str, 0) < _TTL_GAMELIST:
+        return _gamelist_cache[date_str]
+    games = _fetch_kbo_gamelist(date_str)
+    if games:
+        _gamelist_cache[date_str] = games
+        _gamelist_cache_time[date_str] = now
+        return games
+    return _gamelist_cache.get(date_str, [])
+
+
 def _fetch_kbo_gamelist(date_str):
     """KBO GetKboGameList JSON (일반 HTTP POST). 실패 시 []."""
     try:
@@ -1058,7 +1078,7 @@ def get_live_scores(force=False):
         return _scores_cache
 
     # 1차: KBO 공식 JSON (일반 HTTP, Selenium 불필요) — 팀·점수·이닝·상태·B/S/O·주자 포함
-    scores = _scores_from_gamelist(_fetch_kbo_gamelist(today))
+    scores = _scores_from_gamelist(_get_kbo_gamelist_cached(today, force=force))
 
     # 2차 폴백: 기존 GameCenter(Selenium) 텍스트 파싱
     if not scores:
@@ -1268,14 +1288,87 @@ def get_game_id(today):
     return game_ids
 
 
+def _gameinfo_from_gamelist(today, game_id):
+    """GetKboGameList JSON → 게임센터 파싱과 동일한 gameinfo 형태 (Selenium 불필요).
+
+    - 경기 전/취소: T_PIT_P_NM(원정 선발)·B_PIT_P_NM(홈 선발)
+    - 라이브: T_P_NM/B_P_NM = 각 팀 현재 선수. 초(T)=원정 공격 → 원정이 타자,
+      말(B)=홈 공격 → 홈이 타자 (프로브의 실데이터로 확인: 8회말 홈 B_P=양의지 타자)
+    - 종료: W/SV/L_PIT_P_NM(승·세·패)을 점수로 승패 팀에 배분
+    매칭 실패·데이터 공백이면 None → 호출자가 기존 Selenium 파싱으로 폴백."""
+    g = next((x for x in _get_kbo_gamelist_cached(today)
+              if str(x.get('G_ID') or '') == game_id), None)
+    if g is None:
+        return None
+
+    def _nm(key):
+        return str(g.get(key) or '').strip()
+
+    state  = str(g.get('GAME_STATE_SC') or '')
+    cancel = str(g.get('CANCEL_SC_ID') or '0')
+    cancelled = cancel not in ('0', '', 'None')
+
+    if cancelled or state == '1':
+        away_sp, home_sp = _nm('T_PIT_P_NM'), _nm('B_PIT_P_NM')
+        if not away_sp and not home_sp:
+            return None
+        return {
+            'status': 'cancelled' if cancelled else 'pre',
+            'away_pitchers': [{'label': '선발', 'name': away_sp}],
+            'home_pitchers': [{'label': '선발', 'name': home_sp}],
+        }
+
+    if state == '2':
+        away_cur, home_cur = _nm('T_P_NM'), _nm('B_P_NM')
+        if not away_cur and not home_cur:
+            return None
+        is_top = str(g.get('GAME_TB_SC') or '') == 'T'
+        return {
+            'status': 'live',
+            'away_pitchers': [{'label': '타' if is_top else '투', 'name': away_cur}],
+            'home_pitchers': [{'label': '투' if is_top else '타', 'name': home_cur}],
+        }
+
+    # 종료
+    try:
+        a = int(g.get('T_SCORE_CN'))
+        h = int(g.get('B_SCORE_CN'))
+    except (TypeError, ValueError):
+        return None
+    winners = [{'label': '승', 'name': _nm('W_PIT_P_NM')}] if _nm('W_PIT_P_NM') else []
+    if _nm('SV_PIT_P_NM'):
+        winners.append({'label': '세', 'name': _nm('SV_PIT_P_NM')})
+    losers = [{'label': '패', 'name': _nm('L_PIT_P_NM')}] if _nm('L_PIT_P_NM') else []
+    if a > h:
+        away_p, home_p = winners, losers
+    elif h > a:
+        away_p, home_p = losers, winners
+    else:
+        away_p, home_p = [], []  # 무승부
+    return {
+        'status': 'ended',
+        'away_score': str(a), 'home_score': str(h),
+        'away_pitchers': away_p, 'home_pitchers': home_p,
+    }
+
+
 def get_pitcher_from_gamecenter(today, game_id, force=False):
-    """게임센터에서 투수/타자 정보 파싱 (스냅샷 공유)"""
+    """투수/타자 정보 — 1차 KBO 공식 JSON, 폴백 게임센터(Selenium) 파싱"""
     global _gameinfo_cache, _gameinfo_cache_time
     now = time_module.time()
     cache_key = game_id
 
     if not force and cache_key in _gameinfo_cache and now - _gameinfo_cache_time.get(cache_key, 0) < _TTL_GAMEINFO:
         return _gameinfo_cache[cache_key]
+
+    try:
+        info = _gameinfo_from_gamelist(today, game_id)
+        if info:
+            _gameinfo_cache[cache_key] = info
+            _gameinfo_cache_time[cache_key] = time_module.time()
+            return info
+    except Exception as e:
+        print(f"[gameinfo gamelist 오류] {e}")
 
     try:
         snap = _get_gamecenter_snapshot(today, force=force)
@@ -1433,15 +1526,17 @@ def get_team_ranking(force=False):
 
     for label, url in urls:
         try:
-            body = _fetch_body_text(
-                url,
-                wait_patterns=[r'(LG|KT|SSG|NC|두산|KIA|롯데|삼성|한화|키움)']
-            )
-            if body is None:
-                print(f"[순위] {label} body 없음 → 다음 URL 시도")
-                continue
-
-            lines = [l.strip() for l in body.split('\n') if l.strip()]
+            # 일반 HTTP GET — 순위표는 서버렌더 테이블이라 JS가 필요 없다.
+            # 테이블 행을 셀 공백-조인해 Selenium body.text와 같은 줄 형식으로 만들어
+            # 기존 정규식(pc_re/mobile_re)을 그대로 재사용한다.
+            from bs4 import BeautifulSoup
+            res = requests.get(url, headers=_get_kbo_headers(), timeout=10)
+            soup = BeautifulSoup(res.text, 'lxml')
+            lines = [
+                ' '.join(c.get_text(strip=True) for c in tr.find_all(['th', 'td']))
+                for tr in soup.find_all('tr')
+            ]
+            lines = [l.strip() for l in lines if l.strip()]
             ranking = []
             for line in lines:
                 m = pc_re.match(line) or mobile_re.match(line)
