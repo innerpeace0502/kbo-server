@@ -101,6 +101,8 @@ _linescore_cache_time = 0
 _relay_events = []   # [{'ts','time','away','home','inning','team','runs','score','text'}]
 _relay_date   = ""
 _relay_prev   = {}   # {(away,home): (away_score, home_score)} 직전 관측 점수
+_relay_seen   = {}   # {(away,home): 마지막 처리한 네이버 문자중계 seqno}
+_relay_inn    = {}   # {(away,home): 마지막 처리한 이닝 번호}
 _relay_lock   = threading.Lock()
 _RELAY_MAX    = 200
 
@@ -987,30 +989,120 @@ def _get_line_scores(force=False):
 
 # ─────────────────────────────────────────
 # 득점 이벤트(문자중계 상황카드)
+#
+# 1차: 네이버 스포츠 문자중계 API — 플레이 단위 텍스트("박동원 : 좌월 2점 홈런")와
+#      그 시점 스코어(currentGameState)를 제공해 '누가 어떻게' 득점했는지 표시.
+#      gameId = KBO G_ID + SEASON_ID (예: 20260707LGSS0 + 2026), 이닝 단위 조회.
+# 폴백: 네이버 실패 시 기존 점수-diff 방식("N회말 팀 1득점")으로 최소한의 카드 유지.
 # ─────────────────────────────────────────
 
-def _update_relay_events(scores, today):
-    """스코어 갱신 사이클마다 점수 변화를 감지해 득점 이벤트를 누적한다.
+_NAVER_RELAY_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    'Referer': 'https://m.sports.naver.com/',
+}
 
-    - 외부 요청 0회: get_live_scores가 이미 만든 scores만 본다.
-    - 첫 관측(직전 점수 없음)은 이벤트 없이 기준점만 기록 — 서버 재시작 시
+
+def _fetch_naver_relay_options(naver_gid, inning):
+    """네이버 문자중계 한 이닝 → seqno 정렬된 플레이 항목 리스트.
+    각 항목: {'seq','inn','half','text','a','h'} (a/h = 그 시점 누적 원정/홈 점수)."""
+    res = requests.get(
+        f'https://api-gw.sports.naver.com/schedule/games/{naver_gid}/relay',
+        params={'inningNo': inning}, headers=_NAVER_RELAY_HEADERS, timeout=8)
+    data = res.json()['result']['textRelayData']
+    out = []
+    for tr in (data.get('textRelays') or []):
+        inn  = tr.get('inn')
+        half = '말' if str(tr.get('homeOrAway')) == '1' else '초'
+        for opt in (tr.get('textOptions') or []):
+            gs = opt.get('currentGameState') or {}
+            try:
+                a = int(gs.get('awayScore'))
+                h = int(gs.get('homeScore'))
+            except (TypeError, ValueError):
+                continue
+            seq  = opt.get('seqno')
+            text = str(opt.get('text') or '').strip()
+            if seq is None or not text or text.startswith('='):
+                continue
+            out.append({'seq': seq, 'inn': inn, 'half': half, 'text': text, 'a': a, 'h': h})
+    out.sort(key=lambda x: x['seq'])
+    return out
+
+
+def _naver_relay_events_for_game(s, g, key):
+    """라이브 경기 하나의 새 득점 이벤트를 네이버 문자중계에서 추출.
+    성공 시 (events, new_seq, new_inn, last_score) 반환, 실패 시 예외."""
+    naver_gid = f"{g['G_ID']}{g.get('SEASON_ID', datetime.now(KST).year)}"
+    inn_now = int(g.get('GAME_INN_NO') or 0) or 1
+
+    last_seq = _relay_seen.get(key)
+    last_inn = _relay_inn.get(key, 0)
+    # 이닝이 하나 넘어갔으면 직전 이닝 꼬리 이벤트도 회수 (사이클 사이 전환 대비)
+    innings = [inn_now]
+    if last_inn and inn_now == last_inn + 1:
+        innings = [last_inn, inn_now]
+
+    opts = []
+    for q in innings:
+        opts.extend(_fetch_naver_relay_options(naver_gid, q))
+    opts.sort(key=lambda x: x['seq'])
+    if not opts:
+        raise ValueError('문자중계 항목 없음')
+
+    had_state = key in _relay_prev or key in _relay_seen
+    base = _relay_prev.get(key)
+    events = []
+    for o in opts:
+        is_new = last_seq is None or o['seq'] > last_seq
+        if is_new and had_state and base is not None \
+                and (o['a'], o['h']) != tuple(base):
+            da, dh = o['a'] - base[0], o['h'] - base[1]
+            if da > 0 or dh > 0:
+                team = s['away'] if da > 0 else s['home']
+                events.append({
+                    'ts':     time_module.time(),
+                    'time':   datetime.now(KST).strftime('%H:%M'),
+                    'away':   s['away'],
+                    'home':   s['home'],
+                    'inning': f"{o['inn']}회{o['half']}",
+                    'team':   team,
+                    'runs':   max(da, dh),
+                    'score':  f"{o['a']}:{o['h']}",
+                    'type':   'score',
+                    'text':   f"{o['inn']}회{o['half']} {o['text']}",
+                })
+        base = (o['a'], o['h'])
+    return events, opts[-1]['seq'], inn_now, base
+
+
+def _update_relay_events(scores, today):
+    """스코어 갱신 사이클마다 득점 이벤트를 누적한다.
+
+    - 첫 관측(이전 상태 없음)은 이벤트 없이 기준점만 기록 — 서버 재시작 시
       기존 점수가 몰아서 이벤트로 쏟아지는 것을 방지.
-    - 점수 정정(감소)은 이벤트 없이 기준점만 갱신.
+    - 네이버 문자중계 성공 시 플레이 텍스트 이벤트, 실패 시 점수-diff 폴백.
     - /tmp에 영속 저장해 재시작·절전 모드에도 이벤트가 유지된다.
     """
-    global _relay_events, _relay_date, _relay_prev
+    global _relay_events, _relay_date, _relay_prev, _relay_seen, _relay_inn
     with _relay_lock:
         if _relay_date != today:
             _relay_events = []
             _relay_prev   = {}
+            _relay_seen   = {}
+            _relay_inn    = {}
             _relay_date   = today
             disk, _ = _load_disk_cache('relay')
             if disk and isinstance(disk, dict) and disk.get('date') == today:
                 _relay_events = disk.get('events', [])
-                _relay_prev   = {
-                    tuple(k.split('|', 1)): tuple(v)
-                    for k, v in disk.get('prev', {}).items()
-                }
+                _relay_prev = {tuple(k.split('|', 1)): tuple(v)
+                               for k, v in disk.get('prev', {}).items()}
+                _relay_seen = {tuple(k.split('|', 1)): v
+                               for k, v in disk.get('seen', {}).items()}
+                _relay_inn  = {tuple(k.split('|', 1)): v
+                               for k, v in disk.get('inn', {}).items()}
+
+        gamelist = {(str(x.get('AWAY_NM') or '').strip(), str(x.get('HOME_NM') or '').strip()): x
+                    for x in _get_kbo_gamelist_cached(today)}
 
         changed = False
         for s in scores:
@@ -1021,30 +1113,50 @@ def _update_relay_events(scores, today):
                 h = int(s.get('home_score', ''))
             except ValueError:
                 continue
-            key  = (s['away'], s['home'])
-            prev = _relay_prev.get(key)
-            if prev is not None:
-                pa, ph = prev
-                inning = s.get('inning', '')
-                for team, diff in ((s['away'], a - pa), (s['home'], h - ph)):
-                    if diff > 0:
-                        now_ts = time_module.time()
-                        _relay_events.append({
-                            'ts':     now_ts,
-                            'time':   datetime.now(KST).strftime('%H:%M'),
-                            'away':   s['away'],
-                            'home':   s['home'],
-                            'inning': inning,
-                            'team':   team,
-                            'runs':   diff,
-                            'score':  f"{a}:{h}",
-                            'type':   'score',
-                            'text':   f"{inning} {team} {diff}득점 ({s['away']} {a} : {h} {s['home']})",
-                        })
+            key = (s['away'], s['home'])
+
+            naver_done = False
+            g = gamelist.get(key)
+            if g and g.get('G_ID'):
+                try:
+                    events, new_seq, new_inn, last_score = \
+                        _naver_relay_events_for_game(s, g, key)
+                    if events:
+                        _relay_events.extend(events)
                         changed = True
-            if prev != (a, h):
-                _relay_prev[key] = (a, h)
-                changed = True
+                    if _relay_seen.get(key) != new_seq or _relay_inn.get(key) != new_inn:
+                        changed = True
+                    _relay_seen[key] = new_seq
+                    _relay_inn[key]  = new_inn
+                    _relay_prev[key] = tuple(last_score) if last_score else (a, h)
+                    naver_done = True
+                except Exception as e:
+                    print(f"[relay 네이버 오류] {key} {e}")
+
+            if not naver_done:
+                # 폴백: 점수-diff ("N회말 팀 1득점")
+                prev = _relay_prev.get(key)
+                if prev is not None:
+                    pa, ph = prev
+                    inning = s.get('inning', '')
+                    for team, diff in ((s['away'], a - pa), (s['home'], h - ph)):
+                        if diff > 0:
+                            _relay_events.append({
+                                'ts':     time_module.time(),
+                                'time':   datetime.now(KST).strftime('%H:%M'),
+                                'away':   s['away'],
+                                'home':   s['home'],
+                                'inning': inning,
+                                'team':   team,
+                                'runs':   diff,
+                                'score':  f"{a}:{h}",
+                                'type':   'score',
+                                'text':   f"{inning} {team} {diff}득점 ({s['away']} {a} : {h} {s['home']})",
+                            })
+                            changed = True
+                if prev != (a, h):
+                    _relay_prev[key] = (a, h)
+                    changed = True
 
         if changed:
             if len(_relay_events) > _RELAY_MAX:
@@ -1053,6 +1165,8 @@ def _update_relay_events(scores, today):
                 'date':   today,
                 'events': _relay_events,
                 'prev':   {f"{k[0]}|{k[1]}": list(v) for k, v in _relay_prev.items()},
+                'seen':   {f"{k[0]}|{k[1]}": v for k, v in _relay_seen.items()},
+                'inn':    {f"{k[0]}|{k[1]}": v for k, v in _relay_inn.items()},
             })
 
 
