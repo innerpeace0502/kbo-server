@@ -203,6 +203,8 @@ channel_map = {
 }
 
 KBO_TEAMS = ["LG", "KT", "SSG", "NC", "두산", "KIA", "롯데", "삼성", "한화", "키움"]
+# 올스타전 팀명 (SR_ID=9, 예: 20260711WEEA0 나눔 vs 드림) — 스코어보드/라인스코어 파싱용
+ALLSTAR_TEAMS = ["나눔", "드림"]
 
 BROADCAST_MAP = {
     "SPO-T":  "spotv",  "SPO-2T": "spotv2",
@@ -601,7 +603,8 @@ def _parse_line_scores(source):
             team_rows = []
             for tr in rows[1:]:
                 cells = [c.get_text(strip=True) for c in tr.find_all(['th', 'td'])]
-                if cells and cells[0] in KBO_TEAMS and len(cells) == len(headers):
+                if cells and (cells[0] in KBO_TEAMS or cells[0] in ALLSTAR_TEAMS) \
+                        and len(cells) == len(headers):
                     team_rows.append(cells)
             if len(team_rows) != 2:
                 continue
@@ -2001,6 +2004,20 @@ def morning_schedule_fetch():
             print(f"[scheduler] morning 선발 갱신 오류: {e}")
 
         if not games:
+            # ✅ 올스타전 등 특수경기(나눔/드림)는 팀명 기반 일정 파싱에서 걸러진다 —
+            # 공식 JSON(gamelist)으로 재확인해 있으면 그 시간 기준으로 game_mode 예약
+            # (2026-07-11 올스타 당일 스코어가 절전에 갇혀 안 나오던 문제).
+            special = _get_kbo_gamelist_cached(today, force=True)
+            if special:
+                pseudo = [{'time': str(g.get('G_TM') or '')} for g in special]
+                first_start = _parse_first_game_time(pseudo, today)
+                last_end    = _estimate_last_game_end(pseudo, today)
+                if first_start and last_end:
+                    _schedule_game_mode(first_start, last_end)
+                    print(f"[scheduler] 특수경기(올스타 등) {len(special)}건 — 게임 모드 예약 "
+                          f"ON {(first_start - timedelta(hours=1, minutes=5)).strftime('%H:%M')} / "
+                          f"OFF {(last_end + timedelta(minutes=5)).strftime('%H:%M')}")
+                    return
             # ✅ 휴식일엔 남아있을 수 있는 stale game_* 잡도 정리.
             # 새벽 0~4시 재배포 시 _boot_warm이 '어제'(get_game_date) 일정 기준으로
             # 예약한 잡이 남아, 휴식일 저녁에 Chrome이 헛돌이로 켜지는 것 방지
@@ -2521,6 +2538,36 @@ def _is_all_games_started_long_ago(games, base_date, hours_after_start=4):
     return False
 
 
+def _find_allstar(today_str):
+    """이번 달 일정에서 올스타전(나눔 vs 드림, SR_ID=9) 탐색.
+    발견 시 {'date': 'yyyyMMdd', 'time': 'HH:MM', 'stadium': str} — 없으면 None.
+    (일반 스케줄 파싱은 10개 구단 팀명 기준이라 올스타전이 걸러진다)"""
+    try:
+        year = today_str[:4]
+        result = _get_schedule_rows(today_str)  # 월별 캐시 재사용
+        current_date = ''
+        STAD_LIST = ['잠실', '수원', '창원', '대구', '광주', '인천', '문학', '대전', '사직', '고척', '청주', '포항', '울산']
+        for row_obj in result.get('rows', []):
+            cells = [strip_html(c.get('Text', '')) for c in row_obj.get('row', [])]
+            for cell in cells:
+                if re.match(r'\d{2}\.\d{2}', cell) and len(cell) <= 8:
+                    current_date = cell[:5]
+                    break
+            if not any('나눔' in c and '드림' in c for c in cells):
+                continue
+            time_text = next((c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '18:00')
+            stadium = next((c for c in cells if any(s in c for s in STAD_LIST)), '')
+            if current_date:
+                return {
+                    'date': f"{year}{current_date[:2]}{current_date[3:5]}",
+                    'time': time_text,
+                    'stadium': stadium,
+                }
+    except Exception as e:
+        print(f"[올스타 탐색 오류] {e}")
+    return None
+
+
 @app.route('/api/schedule/today')
 def today_schedule():
     team      = request.args.get('team')
@@ -2534,6 +2581,30 @@ def today_schedule():
     # get_game_date()가 04:00 컷오프라 자정~04:00 사이엔 어제 게임 날짜를 유지하므로,
     # 오늘 경기가 다 끝났어도 04:00이 지나기 전까진 결과를 그대로 보여준다.
     if not games:
+        # 올스타 브레이크 감지 — 정규경기가 없는 날 + 올스타전(나눔vs드림)이
+        # 근처(D-3 ~ 다음 정규경기 전날)에 있으면 브레이크 기간으로 표시.
+        allstar = _find_allstar(today_str)
+
+        def _allstar_extra(next_dt):
+            if not allstar:
+                return {}
+            try:
+                ad = datetime.strptime(allstar['date'], '%Y%m%d')
+            except ValueError:
+                return {}
+            in_break = (ad - timedelta(days=3)) <= today and (next_dt is None or today < next_dt)
+            if not in_break:
+                return {}
+            return {
+                '올스타브레이크': True,
+                '올스타': {
+                    '날짜': f"{allstar['date'][4:6]}.{allstar['date'][6:8]}",
+                    '시간': allstar['time'],
+                    '경기장': allstar['stadium'],
+                    '오늘': allstar['date'] == today_str,
+                },
+            }
+
         for delta in range(1, 8):
             next_date = today + timedelta(days=delta)
             next_str = next_date.strftime('%Y%m%d')
@@ -2547,13 +2618,15 @@ def today_schedule():
                     '경기수': len(next_games),
                     '내일경기': delta == 1,
                     '다음경기': delta > 1,
+                    **_allstar_extra(next_date),
                 })
         # 7일 안에 경기 없으면 빈 응답
         return jsonify({
             '날짜': today.strftime('%Y-%m-%d'),
             '경기목록': [],
             '경기수': 0,
-            'note': '향후 7일간 예정 경기 없음'
+            'note': '향후 7일간 예정 경기 없음',
+            **_allstar_extra(None),
         })
 
     return jsonify({'날짜': today.strftime('%Y-%m-%d'), '경기목록': games, '경기수': len(games)})
