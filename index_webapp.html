@@ -725,6 +725,12 @@ async function loadAll() {
       dateEl.textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
       dateEl.style.color = '';
     }
+    // 시리즈 라벨 — 정규 외(시범경기/WC1/준PO2/KS3 …)만 서버가 값을 준다
+    const series = game['시리즈'] || '';
+    if (series) {
+      dateEl.textContent += ` · ⚾ ${series}`;
+      dateEl.style.color = '#FFD700';
+    }
     document.getElementById('away-name').textContent = game.away;
     document.getElementById('home-name').textContent = game.home;
     // 양팀 순위 카드의 팀명 칩 (앱 9f72cc3 동기화)

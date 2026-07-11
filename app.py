@@ -705,7 +705,9 @@ def _get_schedule_rows(today):
             return cached
 
     data = {
-        'leId': '1', 'srIdList': '0,9',
+        # 전 시리즈 요청 — 시범(1)·준PO(3)·WC(4)·PO(5)·KS(7)까지 포함해야
+        # 포스트시즌·시범경기 기간에 일정/게임ID가 비지 않는다 (기존 '0,9'는 정규+올스타만)
+        'leId': '1', 'srIdList': '0,1,3,4,5,7,9',
         'seasonId': year, 'year': year,
         'month': month, 'gameMonth': month, 'teamId': ''
     }
@@ -727,6 +729,41 @@ def _get_schedule_rows(today):
 
 
 def get_kbo_schedule(date_str):
+    # 1차: KBO 공식 JSON(gamelist) — 시범·포스트시즌까지 전 시리즈 포함 + 시리즈 라벨.
+    # 정규(SR 0) 외에는 '시리즈'에 GAME_SC_NM(시범경기/WC1/준PO2/PO3/KS4 …)을 실어
+    # 앱/웹앱이 어떤 시리즈인지 표시할 수 있게 한다.
+    # 올스타(SR 9)는 제외 — 브레이크 표시 로직(_find_allstar)이 따로 담당.
+    try:
+        games = []
+        for g in _get_kbo_gamelist_cached(date_str):
+            if g.get('SR_ID') in (9, '9'):
+                continue
+            away = str(g.get('AWAY_NM') or '').strip()
+            home = str(g.get('HOME_NM') or '').strip()
+            if not away or not home:
+                continue
+            broadcast = ''
+            for code in str(g.get('TV_IF') or '').split(','):
+                if code.strip() in BROADCAST_MAP:
+                    broadcast = BROADCAST_MAP[code.strip()]
+                    break
+            series = '' if g.get('SR_ID') in (0, '0') \
+                else str(g.get('GAME_SC_NM') or '').strip()
+            games.append({
+                'time': str(g.get('G_TM') or '시간미정'),
+                'away': away, 'home': home,
+                'stadium': str(g.get('S_NM') or ''),
+                'broadcast': broadcast,
+                'away_logo': get_logo_url(away),
+                'home_logo': get_logo_url(home),
+                '시리즈': series,
+            })
+        if games:
+            return games
+    except Exception as e:
+        print(f"[schedule gamelist 오류] {e}")
+
+    # 2차 폴백: 월별 일정 rows 파싱 (시리즈 라벨 없음)
     month = date_str[4:6]
     day   = date_str[6:8]
     target_date = f"{month}.{day}"
@@ -768,7 +805,8 @@ def get_kbo_schedule(date_str):
                     'time': time_text, 'away': away_text, 'home': home_text,
                     'stadium': stadium_text, 'broadcast': broadcast,
                     'away_logo': get_logo_url(away_text),
-                    'home_logo': get_logo_url(home_text)
+                    'home_logo': get_logo_url(home_text),
+                    '시리즈': '',
                 })
         return games
     except Exception as e:
