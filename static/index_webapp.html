@@ -715,8 +715,16 @@ async function loadAll() {
     state.gameTime = game.time || '';
     state.isTomorrow = isTomorrow;
 
-    // 기본 정보 세팅
-    document.getElementById('game-date').textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
+    // 기본 정보 세팅 (올스타 브레이크 기간이면 날짜 줄에 표시 — 서버 161fa84)
+    const allstarBreak = scheduleData['올스타브레이크'] || false;
+    const dateEl = document.getElementById('game-date');
+    if (allstarBreak) {
+      dateEl.textContent = `⭐ 올스타 브레이크 · 다음 경기 ${scheduleData['날짜']}`;
+      dateEl.style.color = '#FFD700';
+    } else {
+      dateEl.textContent = isTomorrow ? '내일 경기 예정' : scheduleData['날짜'];
+      dateEl.style.color = '';
+    }
     document.getElementById('away-name').textContent = game.away;
     document.getElementById('home-name').textContent = game.home;
     // 양팀 순위 카드의 팀명 칩 (앱 9f72cc3 동기화)
