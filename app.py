@@ -214,6 +214,23 @@ BROADCAST_MAP = {
     "K-2T":   "kbs2",         "TVING":  "tving",
 }
 
+# gamelist의 TV_IF는 시점에 따라 두 형식이 관측됨 (2026-07-17 확인):
+#   약어 코드('SPO-2T', 'MS-T' …)와 풀네임('SPOTV2', 'MBC SPORTS' …).
+# 둘 다 매핑하지 않으면 broadcast가 비어 앱이 SPOTV/SPOTV2 동시 안내 폴백을 탄다.
+TVIF_FULLNAME_MAP = {
+    "SPOTV": "spotv", "SPOTV1": "spotv", "SPOTV2": "spotv2",
+    "MBC SPORTS": "mbc_sports", "MBC SPORTS+": "mbc_sports", "MBC SPORTS PLUS": "mbc_sports",
+    "KBS N SPORTS": "kbs_n_sports", "KBSN SPORTS": "kbs_n_sports", "KBS N": "kbs_n_sports",
+    "SBS SPORTS": "sbs_sports",
+    "KBS2": "kbs2", "MBC": "mbc", "SBS": "sbs", "TVING": "tving",
+}
+
+
+def _map_tvif(code):
+    """TV_IF 조각 하나(콤마 분리 후) → 내부 broadcast 코드. 미지 형식이면 ''."""
+    c = str(code or '').strip().upper()
+    return BROADCAST_MAP.get(c) or TVIF_FULLNAME_MAP.get(c) or ''
+
 LOGO_FILES = {
     "LG": "lg.png", "KT": "kt.png", "SSG": "ssg.png",
     "NC": "nc.png", "두산": "doosan.png", "KIA": "kia.png",
@@ -744,8 +761,9 @@ def get_kbo_schedule(date_str):
                 continue
             broadcast = ''
             for code in str(g.get('TV_IF') or '').split(','):
-                if code.strip() in BROADCAST_MAP:
-                    broadcast = BROADCAST_MAP[code.strip()]
+                mapped = _map_tvif(code)
+                if mapped:
+                    broadcast = mapped
                     break
             series = '' if g.get('SR_ID') in (0, '0') \
                 else str(g.get('GAME_SC_NM') or '').strip()
