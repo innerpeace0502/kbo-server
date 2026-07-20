@@ -2596,12 +2596,14 @@ def _is_all_games_started_long_ago(games, base_date, hours_after_start=4):
 
 def _find_allstar(today_str):
     """이번 달 일정에서 올스타전(나눔 vs 드림, SR_ID=9) 탐색.
-    발견 시 {'date': 'yyyyMMdd', 'time': 'HH:MM', 'stadium': str} — 없으면 None.
+    발견 시 {'date': 'yyyyMMdd', 'time': 'HH:MM', 'stadium': str, 'resume': str|None}.
+    resume는 올스타전 이후 첫 정규경기 날짜(yyyyMMdd) — 브레이크 종료 판정용.
     (일반 스케줄 파싱은 10개 구단 팀명 기준이라 올스타전이 걸러진다)"""
     try:
         year = today_str[:4]
         result = _get_schedule_rows(today_str)  # 월별 캐시 재사용
         current_date = ''
+        allstar = None
         STAD_LIST = ['잠실', '수원', '창원', '대구', '광주', '인천', '문학', '대전', '사직', '고척', '청주', '포항', '울산']
         for row_obj in result.get('rows', []):
             cells = [strip_html(c.get('Text', '')) for c in row_obj.get('row', [])]
@@ -2609,16 +2611,25 @@ def _find_allstar(today_str):
                 if re.match(r'\d{2}\.\d{2}', cell) and len(cell) <= 8:
                     current_date = cell[:5]
                     break
-            if not any('나눔' in c and '드림' in c for c in cells):
+            if not current_date:
                 continue
-            time_text = next((c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '18:00')
-            stadium = next((c for c in cells if any(s in c for s in STAD_LIST)), '')
-            if current_date:
-                return {
-                    'date': f"{year}{current_date[:2]}{current_date[3:5]}",
-                    'time': time_text,
-                    'stadium': stadium,
-                }
+            row_date = f"{year}{current_date[:2]}{current_date[3:5]}"
+            if allstar is None:
+                if not any('나눔' in c and '드림' in c for c in cells):
+                    continue
+                time_text = next((c for c in cells if re.match(r'\d{2}:\d{2}$', c)), '18:00')
+                stadium = next((c for c in cells if any(s in c for s in STAD_LIST)), '')
+                allstar = {'date': row_date, 'time': time_text,
+                           'stadium': stadium, 'resume': None}
+            elif row_date > allstar['date']:
+                # 올스타전 이후 첫 10개 구단 경기(= 정규 일정 재개일) 탐색
+                vs_cell = next((c for c in cells if 'vs' in c.lower()), '')
+                if vs_cell:
+                    a, h = parse_teams_from_score(vs_cell)
+                    if a and h:
+                        allstar['resume'] = row_date
+                        break
+        return allstar
     except Exception as e:
         print(f"[올스타 탐색 오류] {e}")
     return None
@@ -2648,7 +2659,16 @@ def today_schedule():
                 ad = datetime.strptime(allstar['date'], '%Y%m%d')
             except ValueError:
                 return {}
-            in_break = (ad - timedelta(days=3)) <= today and (next_dt is None or today < next_dt)
+            # 브레이크 종료 판정: 올스타전 이후 첫 정규경기일(resume)부터는 평범한
+            # 휴식일/월요일이어도 브레이크가 아니다. resume를 못 찾으면(월 경계 등)
+            # 올스타전 +7일을 상한으로 사용.
+            resume = allstar.get('resume')
+            if resume:
+                break_over = today >= datetime.strptime(resume, '%Y%m%d')
+            else:
+                break_over = today > ad + timedelta(days=7)
+            in_break = (ad - timedelta(days=3)) <= today and not break_over \
+                and (next_dt is None or today < next_dt)
             if not in_break:
                 return {}
             return {
