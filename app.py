@@ -2848,53 +2848,67 @@ def relay_events():
 
 @app.route('/api/gameinfo')
 def game_info():
+    """게임 상세(선발/투타) — 1차 gamelist JSON(절전에도 동작).
+    무경기일엔 내일 경기(선발 공시)로 폴백. Selenium은 chrome 활성 시에만,
+    그마저 안 되면 디스크 캐시가 최후 폴백. (예전엔 절전 가드가 라우트를 막아
+    무경기일에 앱 내 선발이 안 떴다 — 위젯의 /api/pitcher/today와 동일한 문제)"""
     team  = request.args.get('team', '')
     today = get_game_date()
 
-    # Chrome OFF 가드: 디스크 캐시(gameinfo_all)에서 team 경기를 찾아 반환.
-    # 단, game_id 앞 8자리(yyyyMMdd)가 오늘과 같을 때만 — 어제 데이터를 오늘 표시하지 않도록.
-    if not chrome.is_active():
-        disk, ts = _load_disk_cache('gameinfo_all')
-        if disk:
-            today_str = get_game_date()
-            match = next(
-                (g for g in disk
-                 if g.get('game_id', '')[:8] == today_str
-                    and ((not team) or team in (g.get('away'), g.get('home')))),
-                None,
-            )
-            if match:
-                return jsonify({
-                    'game_id':       match.get('game_id', ''),
-                    'away':          match.get('away', ''),
-                    'home':          match.get('home', ''),
-                    'status':        match.get('status', ''),
-                    'away_score':    match.get('away_score', ''),
-                    'home_score':    match.get('home_score', ''),
-                    'away_pitchers': match.get('away_pitchers', []),
-                    'home_pitchers': match.get('home_pitchers', []),
-                    'updated':       _fmt_ts(ts),
-                    'cached_at':     _iso_kst(ts),
-                    'note':          '디스크 캐시 (서버 절전 모드)',
-                    'chrome_mode':   chrome.mode(),
-                })
-        return jsonify(_empty_payload('gameinfo'))
-
-    game_ids = get_game_id(today)
+    date_used = today
+    game_ids  = get_game_id(today)          # 일반 HTTP (월별 일정 rows)
     if not game_ids:
-        return jsonify({'error': '오늘 경기 없음'}), 404
+        date_used = (datetime.strptime(today, '%Y%m%d')
+                     + timedelta(days=1)).strftime('%Y%m%d')
+        game_ids  = get_game_id(date_used)
 
-    if team and team in game_ids:
-        game_id = game_ids[team]
-    else:
-        game_id = list(game_ids.values())[0]
+    game_id = None
+    if game_ids:
+        if team:
+            # away/home 어느 쪽이든 매칭 (기존엔 away 키로만 찾아 홈팀 조회가 어긋났다)
+            code = TEAM_CODE.get(team, '')
+            game_id = next((gid for gid in game_ids.values()
+                            if code and (gid[8:10] == code or gid[10:12] == code)), None)
+        if game_id is None:
+            game_id = list(game_ids.values())[0]
+
+    gc = get_pitcher_from_gamecenter(date_used, game_id) if game_id else None
+
+    if not gc:
+        # gamelist로 못 얻음 — 절전이면 디스크 캐시(gameinfo_all) 폴백 (오늘 데이터만)
+        if not chrome.is_active():
+            disk, ts = _load_disk_cache('gameinfo_all')
+            if disk:
+                match = next(
+                    (g for g in disk
+                     if g.get('game_id', '')[:8] == date_used
+                        and ((not team) or team in (g.get('away'), g.get('home')))),
+                    None,
+                )
+                if match:
+                    return jsonify({
+                        'game_id':       match.get('game_id', ''),
+                        'away':          match.get('away', ''),
+                        'home':          match.get('home', ''),
+                        'status':        match.get('status', ''),
+                        'away_score':    match.get('away_score', ''),
+                        'home_score':    match.get('home_score', ''),
+                        'away_pitchers': match.get('away_pitchers', []),
+                        'home_pitchers': match.get('home_pitchers', []),
+                        'updated':       _fmt_ts(ts),
+                        'cached_at':     _iso_kst(ts),
+                        'note':          '디스크 캐시 (서버 절전 모드)',
+                        'chrome_mode':   chrome.mode(),
+                    })
+            return jsonify(_empty_payload('gameinfo'))
+        if not game_id:
+            return jsonify({'error': '경기 없음'}), 404
 
     away_code = game_id[8:10]
     home_code = game_id[10:12]
     away_name = CODE_TEAM.get(away_code, away_code)
     home_name = CODE_TEAM.get(home_code, home_code)
 
-    gc = get_pitcher_from_gamecenter(today, game_id)
     updated_ts = _gameinfo_cache_time.get(game_id, 0)
     if not gc:
         return jsonify({
