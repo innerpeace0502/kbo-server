@@ -1543,6 +1543,11 @@ def get_pitcher_from_gamecenter(today, game_id, force=False):
     except Exception as e:
         print(f"[gameinfo gamelist 오류] {e}")
 
+    # 절전 모드에선 Selenium 폴백으로 Chrome을 깨우지 않는다
+    # (gamelist가 비면 그냥 캐시/None 반환 — 호출자가 빈값 처리)
+    if not chrome.is_active():
+        return _gameinfo_cache.get(cache_key)
+
     try:
         snap = _get_gamecenter_snapshot(today, force=force)
         if not snap:
@@ -2400,7 +2405,9 @@ def _attach_pitcher_info(date_str, games):
                 game_hhmm = 18 * 60 + 30  # 파싱 실패 시 기본값
 
             # ✅ 경기 시작 10분 이후면 투수 정보 스킵 (Selenium 호출 안 함)
-            if now_hhmm >= game_hhmm + 10:
+            # 단, 미래 날짜(내일 선발 조회)는 시간 비교가 무의미하므로 스킵하지 않는다
+            # — 저녁에 내일 18:30 경기를 '이미 시작'으로 오판해 빈값을 주던 버그.
+            if date_str <= now_kst.strftime('%Y%m%d') and now_hhmm >= game_hhmm + 10:
                 game['away_pitcher'] = ''
                 game['home_pitcher'] = ''
                 continue
@@ -2710,45 +2717,46 @@ def today_schedule():
 
 @app.route('/api/pitcher/today')
 def pitcher_today():
-    """선발투수 전용 API — 무거운 Selenium 호출을 schedule API와 분리"""
+    """선발투수 전용 API — 1차 KBO 공식 JSON(gamelist, 절전 모드에도 동작),
+    Selenium은 chrome 활성 시에만 폴백, 그마저 비면 디스크 캐시가 최후 폴백.
+    (예전엔 절전 가드가 라우트 전체를 막아 무경기일에 내일 선발이 안 나왔다)"""
     team      = request.args.get('team')
-    # Chrome OFF 가드: Selenium 호출 대신 디스크 캐시 fallback.
-    # 선발은 경기 전 확정 정보라 절전 시간대(낮)에도 캐시로 보여줄 수 있어야 한다.
-    # 단, 디스크 캐시는 24h 유효이므로 어제 데이터를 오늘 보여주지 않도록 date 비교로 거른다.
-    if not chrome.is_active():
-        disk_data, disk_ts = _load_disk_cache('pitcher')
-        if disk_data:
-            today_str = get_game_date()
-            result = [p for p in disk_data if p.get('date') == today_str]
-            if team:
-                result = [p for p in result if team in p['away'] or team in p['home']]
-            if result:
-                return jsonify({
-                    'pitchers': result,
-                    'cached_at': _iso_kst(disk_ts),
-                    'note': '디스크 캐시 (서버 절전 모드)',
-                    'chrome_mode': chrome.mode(),
-                })
-        return jsonify(_empty_payload('pitcher'))
     today_str = get_game_date()
     today     = datetime.strptime(today_str, '%Y%m%d')
     games     = get_kbo_schedule(today_str)
     if team:
         games = [g for g in games if team in g['away'] or team in g['home']]
 
+    date_used = today_str
     if not games:
-        tomorrow_str = (today + timedelta(days=1)).strftime('%Y%m%d')
-        games        = get_kbo_schedule(tomorrow_str)
+        # 오늘 경기가 없으면 내일 선발 공시를 대신 보여준다 (월요일 등)
+        date_used = (today + timedelta(days=1)).strftime('%Y%m%d')
+        games     = get_kbo_schedule(date_used)
         if team:
             games = [g for g in games if team in g['away'] or team in g['home']]
-        games = _attach_pitcher_info(tomorrow_str, games)
-    else:
-        games = _attach_pitcher_info(today_str, games)
+    games = _attach_pitcher_info(date_used, games)
 
     result = [{'away': g['away'], 'home': g['home'],
                'away_pitcher': g.get('away_pitcher', ''),
                'home_pitcher': g.get('home_pitcher', '')} for g in games]
-    return jsonify({'pitchers': result})
+    if any(p['away_pitcher'] or p['home_pitcher'] for p in result):
+        return jsonify({'pitchers': result, 'date': date_used})
+
+    # gamelist에서 이름을 못 얻음(공시 전이거나 fetch 실패) → 디스크 캐시 폴백
+    disk_data, disk_ts = _load_disk_cache('pitcher')
+    if disk_data:
+        cached = [p for p in disk_data if p.get('date') == date_used]
+        if team:
+            cached = [p for p in cached if team in p['away'] or team in p['home']]
+        if any(p.get('away_pitcher') or p.get('home_pitcher') for p in cached):
+            return jsonify({
+                'pitchers': cached,
+                'cached_at': _iso_kst(disk_ts),
+                'note': '디스크 캐시',
+                'chrome_mode': chrome.mode(),
+            })
+    # 공시 전 등 — 빈 이름이라도 매치업은 내려준다 (앱은 이름 없으면 미표시)
+    return jsonify({'pitchers': result, 'date': date_used})
 
 
 @app.route('/api/schedule/<date>')
