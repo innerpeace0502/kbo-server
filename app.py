@@ -229,7 +229,17 @@ TVIF_FULLNAME_MAP = {
 def _map_tvif(code):
     """TV_IF 조각 하나(콤마 분리 후) → 내부 broadcast 코드. 미지 형식이면 ''."""
     c = str(code or '').strip().upper()
-    return BROADCAST_MAP.get(c) or TVIF_FULLNAME_MAP.get(c) or ''
+    if not c:
+        return ''
+    mapped = BROADCAST_MAP.get(c) or TVIF_FULLNAME_MAP.get(c)
+    if mapped:
+        return mapped
+    # 지상파 'SBS TV'·'MBC TV'·'KBS2 TV' 형식 — 뒤의 'TV' 접미어를 떼고 재시도.
+    # (관측: 2026-08-23 KIA전 TV_IF='SBS TV'가 매핑 안 돼 채널이 빈값 → 오표시)
+    stripped = re.sub(r'\s*TV$', '', c).strip()
+    if stripped and stripped != c:
+        return BROADCAST_MAP.get(stripped) or TVIF_FULLNAME_MAP.get(stripped) or ''
+    return ''
 
 LOGO_FILES = {
     "LG": "lg.png", "KT": "kt.png", "SSG": "ssg.png",
@@ -1942,9 +1952,9 @@ def _bg_refresh_loop():
             hour = now_kst.hour
             # 경기 시간대: KST 14시~다음날 2시
             in_game_hours = (14 <= hour <= 23) or (hour < 2)
-            # 30초: warm 사이클이 경량화(순위 TTL·recent 제거)되어 가능해진 주기.
-            # 라이브 체감 지연 = 서버 주기 + 클라 폴링(30s) → 평균 ~37s에서 ~27s로 단축.
-            interval = 30 if in_game_hours else 300
+            # 20초: warm 사이클이 경량화(순위 TTL·recent 제거)되어 가능해진 주기.
+            # 라이브 체감 지연 = 서버 주기 + 클라 폴링 → 주기를 30→20s로 줄여 신선도 향상.
+            interval = 20 if in_game_hours else 300
             _warm_caches_once()
         except Exception as e:
             print(f"[prewarm loop 오류] {e}")
